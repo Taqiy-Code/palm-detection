@@ -1,0 +1,14 @@
+[project]
+name = "deteksi-komponen-bulb-kendaraan"
+version = "0.1.0"
+description = "Sistem deteksi komponen bulb kendaraan berbasis visi komputer dan pelacakan tangan"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "opencv-contrib-python>=4.10.0,<5.0.0",
+    "numpy>=1.26.0",
+    "PyQt6>=6.6.0",
+    "rtmlib>=0.0.16",
+    "onnxruntime>=1.18.0",
+    "mediapipe>=0.10.14,<=0.10.21",
+]

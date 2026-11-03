@@ -1,0 +1,86 @@
+{
+    "jumlah_roi": 3,
+    "debounce_masuk": 3,
+    "debounce_keluar": 8,
+    "ambang_piksel": 30,
+    "ambang_rasio": 0.08,
+    "debug_diff": false,
+    "use_clahe": false,
+    "clahe_clip_limit": 3.0,
+    "clahe_invert_dark": false,
+    "show_clahe_preview": false,
+    "use_roi_crop": true,
+    "roi_crop_mode": "individual",
+    "roi_crop_padding": 30,
+    "show_crop_box": true,
+    "hand_backend": "mediapipe",
+    "rtm_score_thr": 0.25,
+    "hand_tracking_mode": "full_hand",
+    "camera_index": 0,
+    "frame_width": 1280,
+    "frame_height": 720,
+    "auto_focus": true,
+    "auto_exposure": true,
+    "auto_wb": true,
+    "focus": 20,
+    "exposure": -6,
+    "wb_temp": 4500,
+    "gain": 0,
+    "saved_rois": [
+        [
+            [
+                47,
+                26
+            ],
+            [
+                36,
+                588
+            ],
+            [
+                310,
+                582
+            ],
+            [
+                304,
+                29
+            ]
+        ],
+        [
+            [
+                457,
+                50
+            ],
+            [
+                454,
+                616
+            ],
+            [
+                840,
+                615
+            ],
+            [
+                801,
+                45
+            ]
+        ],
+        [
+            [
+                878,
+                56
+            ],
+            [
+                922,
+                629
+            ],
+            [
+                1235,
+                625
+            ],
+            [
+                1225,
+                45
+            ]
+        ]
+    ],
+    "roi_names": []
+}

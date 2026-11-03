@@ -1,4 +1,4 @@
-"""Palm Detection — sistem verifikasi urutan pengambilan komponen berbasis pelacakan tangan.
+"""Palm Detection - sistem verifikasi urutan pengambilan komponen berbasis pelacakan tangan.
 
 Struktur modul:
     config     : AppConfig (dataclass murni)

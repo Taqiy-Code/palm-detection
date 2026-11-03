@@ -674,21 +674,21 @@ class CameraWorker(QThread):
                             teks = "DONE"
                         elif self.sequencer.statuses[idx] == self.sequencer.statuses[idx].HAND_IN:
                             roi_state = RoiState.HAND_IN
-                            teks = "Tangan di ROI..."
+                            teks = "Tangan di ROI"
                         else:
                             roi_state = RoiState.ACTIVE
-                            teks = "LANGKAH AKTIF"
+                            teks = "Aktif"
                     else:
                         # Langkah terkunci
                         is_err = self.sequencer.process_locked_step(idx, tangan_masuk_roi, debounce_err)
                         if is_err:
                             salah_urut = idx
                             roi_state = RoiState.ERROR
-                            teks = "URUTAN SALAH!"
+                            teks = "URUTAN SALAH"
                         else:
                             roi_state = RoiState.LOCKED
                             target_aktif = (aktif + 1) if aktif is not None else 1
-                            teks = f"Terkunci (Langkah {target_aktif} dulu)"
+                            teks = f"Terkunci (Langkah {target_aktif})"
 
                     self.renderer.draw_roi_card_overlay(
                         frame=frame,
@@ -731,19 +731,19 @@ class CameraWorker(QThread):
                                 LogLevel.INFO.value,
                                 f"Mulai siklus Part #{self.sequencer.parts_completed + 1}...",
                             )
-                            banner_text = f"★ PART #{self.sequencer.parts_completed} SELESAI (+1)! Memulai siklus..."
+                            banner_text = f"PART #{self.sequencer.parts_completed} SELESAI (+1). Memulai siklus baru..."
                         else:
                             banner_text = (
-                                f"★ PART #{self.sequencer.parts_completed} SELESAI! Jauhkan tangan untuk kunci ref baru "
+                                f"PART #{self.sequencer.parts_completed} SELESAI. Jauhkan tangan untuk kalibrasi ref "
                                 f"({self._no_hand_frames}/{needed_clean})..."
                             )
                     else:
-                        banner_text = f"★ PART #{self.sequencer.parts_completed} SELESAI (+1)! Menyiapkan siklus berikutnya..."
+                        banner_text = f"PART #{self.sequencer.parts_completed} SELESAI (+1). Menyiapkan siklus berikutnya..."
                 else:
                     if salah_urut is not None:
                         target_name = self.config.get_roi_name(aktif_now)
                         wrong_name = self.config.get_roi_name(salah_urut)
-                        banner_text = f"URUTAN SALAH! Tangan di [{wrong_name}]. Kerjakan [{target_name}] dulu!"
+                        banner_text = f"URUTAN SALAH! Kerjakan [{target_name}], bukan [{wrong_name}]"
                         banner_state = BannerState.ERROR
                         if now - self.sequencer.last_error_log_time > 2.0:
                             self.sequencer.last_error_log_time = now
@@ -753,7 +753,7 @@ class CameraWorker(QThread):
                             )
                     else:
                         step_name = self.config.get_roi_name(aktif_now)
-                        banner_text = f"GILIRAN KERJA: Ambil [{step_name}] pada ROI {aktif_now + 1}"
+                        banner_text = f"Ambil [{step_name}] pada ROI {aktif_now + 1}"
                         banner_state = BannerState.ACTIVE
 
             self._prev_gray = gray_now.copy()

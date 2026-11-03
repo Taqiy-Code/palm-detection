@@ -176,11 +176,11 @@ class ROICardWidget(QFrame):
         )
         self.name_edit.editingFinished.connect(self._on_name_edited)
 
-        self.btn_redo = QPushButton("↺")
-        self.btn_redo.setFixedSize(24, 22)
+        self.btn_redo = QPushButton("Reset")
+        self.btn_redo.setFixedSize(45, 22)
         self.btn_redo.setStyleSheet(
             "background-color: #21262d; border: 1px solid #30363d; border-radius: 4px; "
-            "color: #e6edf3; font-weight: bold; font-size: 12px; padding: 0px;"
+            "color: #e6edf3; font-weight: normal; font-size: 11px; padding: 0px;"
         )
         self.btn_redo.clicked.connect(lambda: self.redo_requested.emit(self.idx))
 
@@ -194,7 +194,7 @@ class ROICardWidget(QFrame):
         top_row.addWidget(self.badge_lbl)
 
         bottom_row = QHBoxLayout()
-        self.ratio_lbl = QLabel("Perubahan: 0.0%")
+        self.ratio_lbl = QLabel("Diff: 0.0%")
         self.ratio_lbl.setStyleSheet("color: #8b949e; font-size: 11px;")
         self.debounce_lbl = QLabel("")
         self.debounce_lbl.setStyleSheet("color: #58a6ff; font-size: 11px; font-weight: bold;")
@@ -241,7 +241,7 @@ class ROICardWidget(QFrame):
             f"background-color: {border}; color: #ffffff; font-weight: bold; "
             f"font-size: 11px; border-radius: 4px; padding: 2px 6px;"
         )
-        self.ratio_lbl.setText(f"Rasio Diff: {ratio * 100:.1f}% (Target ≥ {ambang_rasio * 100:.1f}%)")
+        self.ratio_lbl.setText(f"Diff: {ratio * 100:.1f}% (Min {ambang_rasio * 100:.1f}%)")
         self.debounce_lbl.setText(debounce)
 
 
@@ -252,7 +252,7 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.config = config
         self.worker = worker
-        self.setWindowTitle("⚙ Pengaturan Sistem dan Kalibrasi Kamera")
+        self.setWindowTitle("Pengaturan Sistem")
 
         screen = self.screen() or (parent.screen() if parent else None) or QApplication.primaryScreen()
         if screen:
@@ -271,21 +271,21 @@ class SettingsDialog(QDialog):
         layout.setSpacing(12)
 
         self.tabs = QTabWidget()
-        self.tabs.addTab(self._create_engine_param_tab(), "Engine dan Deteksi ROI")
-        self.tabs.addTab(self._create_glove_crop_tab(), "Sarung Tangan dan Crop")
-        self.tabs.addTab(self._create_camera_tab(), "Kalibrasi Kamera dan Profil")
+        self.tabs.addTab(self._create_engine_param_tab(), "Deteksi ROI")
+        self.tabs.addTab(self._create_glove_crop_tab(), "Filter dan Crop")
+        self.tabs.addTab(self._create_camera_tab(), "Kamera")
         layout.addWidget(self.tabs, stretch=1)
 
         bottom_row = QHBoxLayout()
         bottom_row.setSpacing(8)
 
-        btn_save_cfg = QPushButton("💾 Simpan ke config.json")
+        btn_save_cfg = QPushButton("Simpan Konfigurasi")
         btn_save_cfg.setStyleSheet(
             "background-color: #1f5f35; border: 1px solid #3fb950; font-weight: bold; padding: 7px 16px;"
         )
         btn_save_cfg.clicked.connect(self.save_configuration)
 
-        btn_load_cfg = QPushButton("📂 Muat dari config.json")
+        btn_load_cfg = QPushButton("Muat Konfigurasi")
         btn_load_cfg.setStyleSheet(
             "background-color: #21262d; border: 1px solid #30363d; padding: 7px 16px;"
         )
@@ -295,7 +295,7 @@ class SettingsDialog(QDialog):
         bottom_row.addWidget(btn_load_cfg)
         bottom_row.addStretch()
 
-        btn_close = QPushButton("Tutup Pengaturan")
+        btn_close = QPushButton("Tutup")
         btn_close.setStyleSheet(
             "background-color: #21262d; border: 1px solid #30363d; padding: 7px 22px; font-weight: bold;"
         )
@@ -309,14 +309,14 @@ class SettingsDialog(QDialog):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(12)
 
-        engine_group = QGroupBox("Engine Deteksi Tangan (Dual-Backend)")
+        engine_group = QGroupBox("Engine Deteksi")
         engine_layout = QGridLayout(engine_group)
         engine_layout.setVerticalSpacing(8)
 
         engine_layout.addWidget(QLabel("Backend Deteksi:"), 0, 0)
         self.combo_backend = QComboBox()
-        self.combo_backend.addItem("RTMlib (RTMPose Hand - Rekomendasi)", "rtmlib")
-        self.combo_backend.addItem("Google MediaPipe Hands", "mediapipe")
+        self.combo_backend.addItem("RTMlib (RTMPose)", "rtmlib")
+        self.combo_backend.addItem("MediaPipe Hands", "mediapipe")
         idx_b = 0 if self.config.hand_backend == "rtmlib" else 1
         self.combo_backend.setCurrentIndex(idx_b)
         self.combo_backend.currentIndexChanged.connect(self.on_backend_changed)
@@ -332,11 +332,11 @@ class SettingsDialog(QDialog):
         )
         engine_layout.addWidget(self.spin_rtm_score, 1, 1)
 
-        engine_layout.addWidget(QLabel("Mode Area Tangan:"), 2, 0)
+        engine_layout.addWidget(QLabel("Mode Pelacakan:"), 2, 0)
         self.combo_tracking_mode = QComboBox()
-        self.combo_tracking_mode.addItem("Seluruh Tangan (21 Sendi dan Kontur - Rekomendasi)", "full_hand")
-        self.combo_tracking_mode.addItem("Pusat Punggung Tangan (Genggam Bebas)", "palm_center")
-        self.combo_tracking_mode.addItem("5 Ujung Jari (Kaku / Wajib Terbuka)", "fingertips")
+        self.combo_tracking_mode.addItem("Seluruh Tangan (21 Titik)", "full_hand")
+        self.combo_tracking_mode.addItem("Pusat Tangan", "palm_center")
+        self.combo_tracking_mode.addItem("5 Ujung Jari", "fingertips")
         mode_idx_map = {"full_hand": 0, "palm_center": 1, "fingertips": 2}
         self.combo_tracking_mode.setCurrentIndex(mode_idx_map.get(self.config.hand_tracking_mode, 0))
         self.combo_tracking_mode.currentIndexChanged.connect(self.on_tracking_mode_changed)
@@ -344,18 +344,18 @@ class SettingsDialog(QDialog):
 
         layout.addWidget(engine_group)
 
-        param_group = QGroupBox("Parameter Urutan dan Sensitivitas ROI")
+        param_group = QGroupBox("Parameter Deteksi ROI")
         grid = QGridLayout(param_group)
         grid.setVerticalSpacing(10)
 
-        grid.addWidget(QLabel("Jumlah Langkah (ROI):"), 0, 0)
+        grid.addWidget(QLabel("Jumlah ROI:"), 0, 0)
         self.spin_jumlah_roi = QSpinBox()
         self.spin_jumlah_roi.setRange(1, 6)
         self.spin_jumlah_roi.setValue(self.config.jumlah_roi)
         self.spin_jumlah_roi.valueChanged.connect(self.on_jumlah_roi_changed)
         grid.addWidget(self.spin_jumlah_roi, 0, 1)
 
-        grid.addWidget(QLabel("Ambang Intensitas Piksel:"), 1, 0)
+        grid.addWidget(QLabel("Ambang Piksel:"), 1, 0)
         self.spin_ambang_piksel = QSpinBox()
         self.spin_ambang_piksel.setRange(5, 200)
         self.spin_ambang_piksel.setValue(self.config.ambang_piksel)
@@ -365,7 +365,7 @@ class SettingsDialog(QDialog):
         )
         grid.addWidget(self.spin_ambang_piksel, 1, 1)
 
-        grid.addWidget(QLabel("Ambang Rasio Area Berubah:"), 2, 0)
+        grid.addWidget(QLabel("Ambang Rasio Area:"), 2, 0)
         self.spin_ambang_rasio = QDoubleSpinBox()
         self.spin_ambang_rasio.setRange(0.5, 95.0)
         self.spin_ambang_rasio.setSingleStep(0.5)
@@ -377,7 +377,7 @@ class SettingsDialog(QDialog):
         )
         grid.addWidget(self.spin_ambang_rasio, 2, 1)
 
-        grid.addWidget(QLabel("Debounce Masuk (Tangan Masuk):"), 3, 0)
+        grid.addWidget(QLabel("Debounce Masuk:"), 3, 0)
         self.spin_debounce_masuk = QSpinBox()
         self.spin_debounce_masuk.setRange(1, 60)
         self.spin_debounce_masuk.setSuffix(" frame")
@@ -387,7 +387,7 @@ class SettingsDialog(QDialog):
         )
         grid.addWidget(self.spin_debounce_masuk, 3, 1)
 
-        grid.addWidget(QLabel("Debounce Keluar (Tangan Keluar):"), 4, 0)
+        grid.addWidget(QLabel("Debounce Keluar:"), 4, 0)
         self.spin_debounce_keluar = QSpinBox()
         self.spin_debounce_keluar.setRange(1, 90)
         self.spin_debounce_keluar.setSuffix(" frame")
@@ -397,7 +397,7 @@ class SettingsDialog(QDialog):
         )
         grid.addWidget(self.spin_debounce_keluar, 4, 1)
 
-        self.chk_debug_diff = QCheckBox("Tampilkan Highlight Piksel Berubah (Mode Debug Diff)")
+        self.chk_debug_diff = QCheckBox("Tampilkan Highlight Piksel Berubah")
         self.chk_debug_diff.setChecked(self.config.debug_diff)
         self.chk_debug_diff.toggled.connect(lambda c: setattr(self.config, "debug_diff", c))
         grid.addWidget(self.chk_debug_diff, 5, 0, 1, 2)
@@ -417,16 +417,16 @@ class SettingsDialog(QDialog):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(12)
 
-        glove_group = QGroupBox("Optimasi Sarung Tangan (CLAHE dan Pseudo-Skin)")
+        glove_group = QGroupBox("Filter Sarung Tangan (CLAHE)")
         glove_layout = QGridLayout(glove_group)
         glove_layout.setVerticalSpacing(8)
 
-        self.chk_use_clahe = QCheckBox("Aktifkan Filter Sarung Tangan (CLAHE + Pseudo-Skin)")
+        self.chk_use_clahe = QCheckBox("Aktifkan Filter Sarung Tangan")
         self.chk_use_clahe.setChecked(self.config.use_clahe)
         self.chk_use_clahe.toggled.connect(self.on_use_clahe_toggled)
         glove_layout.addWidget(self.chk_use_clahe, 0, 0, 1, 2)
 
-        self.chk_clahe_invert = QCheckBox("Invert Warna (Khusus Sarung Tangan Hitam/Gelap)")
+        self.chk_clahe_invert = QCheckBox("Invert Warna (Sarung Tangan Gelap)")
         self.chk_clahe_invert.setChecked(self.config.clahe_invert_dark)
         self.chk_clahe_invert.toggled.connect(lambda c: setattr(self.config, "clahe_invert_dark", c))
         glove_layout.addWidget(self.chk_clahe_invert, 1, 0, 1, 2)
@@ -441,25 +441,25 @@ class SettingsDialog(QDialog):
         )
         glove_layout.addWidget(self.spin_clahe_clip, 2, 1)
 
-        self.chk_clahe_preview = QCheckBox("Tampilkan Citra Pseudo-Skin di Layar (Debug Preview)")
+        self.chk_clahe_preview = QCheckBox("Tampilkan Preview Citra")
         self.chk_clahe_preview.setChecked(self.config.show_clahe_preview)
         self.chk_clahe_preview.toggled.connect(lambda c: setattr(self.config, "show_clahe_preview", c))
         glove_layout.addWidget(self.chk_clahe_preview, 3, 0, 1, 2)
         layout.addWidget(glove_group)
 
-        crop_group = QGroupBox("Optimasi ROI Cropping (Fokus Area Kerja)")
+        crop_group = QGroupBox("ROI Cropping")
         crop_layout = QGridLayout(crop_group)
         crop_layout.setVerticalSpacing(8)
 
-        self.chk_use_roi_crop = QCheckBox("Aktifkan ROI Cropping (Pangkas Area Deteksi)")
+        self.chk_use_roi_crop = QCheckBox("Aktifkan ROI Cropping")
         self.chk_use_roi_crop.setChecked(self.config.use_roi_crop)
         self.chk_use_roi_crop.toggled.connect(self.on_use_roi_crop_toggled)
         crop_layout.addWidget(self.chk_use_roi_crop, 0, 0, 1, 2)
 
         crop_layout.addWidget(QLabel("Mode Pemotongan:"), 1, 0)
         self.combo_crop_mode = QComboBox()
-        self.combo_crop_mode.addItem("Gabungan Semua ROI (Cepat dan Sinkron)", "union")
-        self.combo_crop_mode.addItem("Individual Tiap Kotak ROI", "individual")
+        self.combo_crop_mode.addItem("Gabungan Semua ROI", "union")
+        self.combo_crop_mode.addItem("Per Kotak ROI", "individual")
         idx_crop = 0 if self.config.roi_crop_mode == "union" else 1
         self.combo_crop_mode.setCurrentIndex(idx_crop)
         self.combo_crop_mode.currentIndexChanged.connect(
@@ -478,7 +478,7 @@ class SettingsDialog(QDialog):
         )
         crop_layout.addWidget(self.spin_crop_padding, 2, 1)
 
-        self.chk_show_crop_box = QCheckBox("Tampilkan Garis Pembatas Crop di Layar")
+        self.chk_show_crop_box = QCheckBox("Tampilkan Garis Pembatas Crop")
         self.chk_show_crop_box.setChecked(self.config.show_crop_box)
         self.chk_show_crop_box.toggled.connect(
             lambda c: setattr(self.config, "show_crop_box", c)
@@ -500,7 +500,7 @@ class SettingsDialog(QDialog):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(10)
 
-        cam_group = QGroupBox("Perangkat Webcam")
+        cam_group = QGroupBox("Perangkat Kamera")
         cam_layout = QHBoxLayout(cam_group)
         cam_layout.addWidget(QLabel("Index Kamera:"))
         self.combo_cam = QComboBox()
@@ -515,7 +515,7 @@ class SettingsDialog(QDialog):
         cam_layout.addWidget(btn_switch_cam)
         layout.addWidget(cam_group)
 
-        auto_group = QGroupBox("Kunci Fitur Otomatis Kamera")
+        auto_group = QGroupBox("Kontrol Otomatis Kamera")
         auto_layout = QHBoxLayout(auto_group)
         self.chk_af = QCheckBox("Auto Focus")
         self.chk_af.setChecked(self.config.auto_focus)
@@ -534,11 +534,11 @@ class SettingsDialog(QDialog):
         auto_layout.addWidget(self.chk_awb)
         layout.addWidget(auto_group)
 
-        slider_group = QGroupBox("Kalibrasi Manual Real-Time")
+        slider_group = QGroupBox("Kalibrasi Kamera")
         s_grid = QGridLayout(slider_group)
         s_grid.setVerticalSpacing(8)
 
-        s_grid.addWidget(QLabel("Focus (0 - 255):"), 0, 0)
+        s_grid.addWidget(QLabel("Focus:"), 0, 0)
         self.slider_focus, self.spin_focus = self._make_slider_spin(
             0, 255, self.config.focus, lambda v: self.worker.update_camera_hardware("focus", v)
         )
@@ -547,7 +547,7 @@ class SettingsDialog(QDialog):
         s_grid.addWidget(self.slider_focus, 0, 1)
         s_grid.addWidget(self.spin_focus, 0, 2)
 
-        s_grid.addWidget(QLabel("Exposure (-13 s/d 0):"), 1, 0)
+        s_grid.addWidget(QLabel("Exposure:"), 1, 0)
         self.slider_exp, self.spin_exp = self._make_slider_spin(
             -13, 0, self.config.exposure, lambda v: self.worker.update_camera_hardware("exposure", v)
         )
@@ -556,7 +556,7 @@ class SettingsDialog(QDialog):
         s_grid.addWidget(self.slider_exp, 1, 1)
         s_grid.addWidget(self.spin_exp, 1, 2)
 
-        s_grid.addWidget(QLabel("WB Temp (2800-6500K):"), 2, 0)
+        s_grid.addWidget(QLabel("White Balance:"), 2, 0)
         self.slider_wb, self.spin_wb = self._make_slider_spin(
             2800, 6500, self.config.wb_temp, lambda v: self.worker.update_camera_hardware("wb_temp", v), step=50
         )
@@ -565,7 +565,7 @@ class SettingsDialog(QDialog):
         s_grid.addWidget(self.slider_wb, 2, 1)
         s_grid.addWidget(self.spin_wb, 2, 2)
 
-        s_grid.addWidget(QLabel("Gain / ISO (0 - 255):"), 3, 0)
+        s_grid.addWidget(QLabel("Gain:"), 3, 0)
         self.slider_gain, self.spin_gain = self._make_slider_spin(
             0, 255, self.config.gain, lambda v: self.worker.update_camera_hardware("gain", v)
         )
@@ -573,9 +573,9 @@ class SettingsDialog(QDialog):
         s_grid.addWidget(self.spin_gain, 3, 2)
         layout.addWidget(slider_group)
 
-        prof_group = QGroupBox("Ekspor Kode OpenCV dan Info Konfigurasi")
+        prof_group = QGroupBox("Ekspor Kode")
         prof_layout = QVBoxLayout(prof_group)
-        btn_copy_code = QPushButton("Cetak dan Salin Kode cap.set(...) ke Clipboard")
+        btn_copy_code = QPushButton("Salin Kode cap.set(...)")
         btn_copy_code.clicked.connect(self.export_cap_set_snippet)
         prof_layout.addWidget(btn_copy_code)
         layout.addWidget(prof_group)
@@ -881,24 +881,20 @@ class MainWindow(QMainWindow):
         title_lbl.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
         title_lbl.setStyleSheet("color: #58a6ff; letter-spacing: 1px;")
 
-        sub_lbl = QLabel("Sistem Urutan Pengambilan Objek dan Verifikasi Langkah")
-        sub_lbl.setStyleSheet("color: #8b949e; font-size: 11px; margin-left: 6px;")
-
         header_bar.addWidget(title_lbl)
-        header_bar.addWidget(sub_lbl)
         header_bar.addStretch()
 
-        btn_settings = QPushButton("⚙ Pengaturan (Ctrl+,)")
+        btn_settings = QPushButton("Pengaturan (Ctrl+,)")
         btn_settings.setStyleSheet("background-color: #1f4f82; border-color: #58a6ff; font-weight: bold; padding: 6px 14px;")
         btn_settings.clicked.connect(self.open_settings_dialog)
 
-        btn_clear_cycle = QPushButton("🔄 Reset Siklus (Ctrl+Shift+C)")
+        btn_clear_cycle = QPushButton("Reset Siklus (Ctrl+Shift+C)")
         btn_clear_cycle.clicked.connect(self.action_clear_status)
 
-        btn_recapture_ref = QPushButton("📷 Ambil Ulang Ref (Ctrl+B)")
+        btn_recapture_ref = QPushButton("Ambil Ulang Ref (Ctrl+B)")
         btn_recapture_ref.clicked.connect(self.action_recapture_ref)
 
-        btn_reset_roi = QPushButton("📐 Buat Ulang ROI (Ctrl+R)")
+        btn_reset_roi = QPushButton("Buat Ulang ROI (Ctrl+R)")
         btn_reset_roi.setStyleSheet("background-color: #491217; border-color: #f85149;")
         btn_reset_roi.clicked.connect(self.action_reset_roi)
 
@@ -995,7 +991,7 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(prod_group)
 
         # Status Urutan Langkah
-        roi_group = QGroupBox("Status Urutan Langkah")
+        roi_group = QGroupBox("Urutan Langkah")
         roi_group_layout = QVBoxLayout(roi_group)
         roi_group_layout.setContentsMargins(8, 8, 8, 8)
         roi_scroll = QScrollArea()
@@ -1014,7 +1010,7 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(roi_group)
 
         # Log Aktivitas
-        log_group = QGroupBox("Log Aktivitas Urutan")
+        log_group = QGroupBox("Log Aktivitas")
         log_layout = QVBoxLayout(log_group)
         log_layout.setContentsMargins(8, 8, 8, 8)
         log_layout.setSpacing(6)
@@ -1023,13 +1019,10 @@ class MainWindow(QMainWindow):
         log_layout.addWidget(self.log_list, stretch=1)
 
         log_btn_row = QHBoxLayout()
-        lbl_auto = QLabel("Auto scroll aktif")
-        lbl_auto.setStyleSheet("color: #484f58; font-size: 10px;")
         btn_clear_log = QPushButton("Bersihkan Log")
         btn_clear_log.setStyleSheet("font-size: 11px; padding: 3px 8px;")
         btn_clear_log.clicked.connect(self.log_list.clear)
 
-        log_btn_row.addWidget(lbl_auto)
         log_btn_row.addStretch()
         log_btn_row.addWidget(btn_clear_log)
         log_layout.addLayout(log_btn_row)

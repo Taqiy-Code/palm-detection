@@ -161,7 +161,7 @@ class StepSequencer:
             self.masuk_counts[step_idx] = 0
             event = SequencerEvent(
                 LogLevel.SUCCESS,
-                f"Langkah {step_idx + 1} ({step_name}) SELESAI — Perubahan: {diff_ratio * 100:.1f}%",
+                f"Langkah {step_idx + 1} ({step_name}) Selesai: Diff {diff_ratio * 100:.1f}%",
             )
             return True, event
         else:
@@ -169,7 +169,7 @@ class StepSequencer:
             self.masuk_counts[step_idx] = 0
             event = SequencerEvent(
                 LogLevel.WARN,
-                f"Langkah {step_idx + 1} tidak terdeteksi: Diff {diff_ratio * 100:.1f}% < target {self.ambang_rasio * 100:.1f}%",
+                f"Langkah {step_idx + 1} ({step_name}) ditolak: Diff {diff_ratio * 100:.1f}% < target {self.ambang_rasio * 100:.1f}%",
             )
             return False, event
 
@@ -207,7 +207,7 @@ class StepSequencer:
             self.parts_completed += 1
             event = SequencerEvent(
                 LogLevel.PART,
-                f"★ PART #{self.parts_completed} SELESAI! ({self.num_steps}/{self.num_steps} Langkah Lengkap)",
+                f"PART #{self.parts_completed} SELESAI ({self.num_steps}/{self.num_steps} Langkah)",
             )
             return True, False, event
 

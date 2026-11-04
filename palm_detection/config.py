@@ -36,9 +36,10 @@ class AppConfig:
     roi_crop_padding: int = 40         # Margin padding dalam piksel
     show_crop_box: bool = True         # Tampilkan garis pembatas crop di video
 
-    # Engine Deteksi Tangan (Dual-Backend: RTMlib vs MediaPipe)
-    hand_backend: str = "rtmlib"             # "rtmlib" (RTMPose Hand) | "mediapipe" (MediaPipe Hands)
-    rtm_score_thr: float = 0.35              # Ambang batas confidence score per sendi RTMlib
+    # Engine Deteksi Tangan (Multi-Backend: RTMlib vs MediaPipe vs YOLO26n-Pose)
+    hand_backend: str = "rtmlib"             # "rtmlib" (RTMPose Hand) | "mediapipe" (MediaPipe Hands) | "yolo26n" (YOLO26n-Pose)
+    rtm_score_thr: float = 0.35              # Ambang batas confidence score per sendi (RTMlib / YOLO Pose)
+    yolo_model_path: str = "yolo26n-pose.pt" # Path atau nama model YOLO Pose (.pt / .onnx)
     hand_tracking_mode: str = "full_hand"     # "full_hand" (Seluruh Tangan - 21 Sendi & Kontur) | "palm_center" | "fingertips"
 
     # Parameter Hardware Kamera

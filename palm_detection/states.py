@@ -53,6 +53,7 @@ class TrackingMode(StrEnum):
 class HandBackend(StrEnum):
     RTMLIB = "rtmlib"
     MEDIAPIPE = "mediapipe"
+    YOLO26N = "yolo26n"
 
 
 class CropMode(StrEnum):

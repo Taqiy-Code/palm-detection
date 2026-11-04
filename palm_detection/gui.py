@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+import os
 import sys
 from typing import List, Optional, Tuple
 
@@ -14,6 +15,7 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
     QDoubleSpinBox,
+    QFileDialog,
     QFrame,
     QGridLayout,
     QGroupBox,
@@ -37,7 +39,7 @@ from PyQt6.QtWidgets import (
 
 from palm_detection.config import AppConfig, CONFIG_FILE
 from palm_detection.states import BannerState, LogLevel, RoiState
-from palm_detection.worker import CameraWorker
+from palm_detection.worker import CameraWorker, release_all_cameras
 
 
 class VideoCanvas(QLabel):
@@ -317,12 +319,33 @@ class SettingsDialog(QDialog):
         self.combo_backend = QComboBox()
         self.combo_backend.addItem("RTMlib (RTMPose)", "rtmlib")
         self.combo_backend.addItem("MediaPipe Hands", "mediapipe")
-        idx_b = 0 if self.config.hand_backend == "rtmlib" else 1
-        self.combo_backend.setCurrentIndex(idx_b)
+        self.combo_backend.addItem("YOLO26n-Pose (Ultralytics)", "yolo26n")
+        backend_idx_map = {"rtmlib": 0, "mediapipe": 1, "yolo26n": 2}
+        self.combo_backend.setCurrentIndex(backend_idx_map.get(self.config.hand_backend, 0))
         self.combo_backend.currentIndexChanged.connect(self.on_backend_changed)
         engine_layout.addWidget(self.combo_backend, 0, 1)
 
-        engine_layout.addWidget(QLabel("Threshold Skor Sendi:"), 1, 0)
+        engine_layout.addWidget(QLabel("Model YOLO Pose:"), 1, 0)
+        yolo_row = QHBoxLayout()
+        yolo_row.setContentsMargins(0, 0, 0, 0)
+        yolo_row.setSpacing(6)
+        self.edit_yolo_model = QLineEdit(self.config.yolo_model_path)
+        self.edit_yolo_model.setPlaceholderText("yolo26n-pose.pt atau path model .pt/.onnx")
+        self.edit_yolo_model.editingFinished.connect(
+            lambda: setattr(
+                self.config,
+                "yolo_model_path",
+                self.edit_yolo_model.text().strip() or "yolo26n-pose.pt",
+            )
+        )
+        self.btn_browse_yolo = QPushButton("Pilih...")
+        self.btn_browse_yolo.setFixedWidth(68)
+        self.btn_browse_yolo.clicked.connect(self.on_browse_yolo_model)
+        yolo_row.addWidget(self.edit_yolo_model, 1)
+        yolo_row.addWidget(self.btn_browse_yolo)
+        engine_layout.addLayout(yolo_row, 1, 1)
+
+        engine_layout.addWidget(QLabel("Threshold Skor Sendi:"), 2, 0)
         self.spin_rtm_score = QDoubleSpinBox()
         self.spin_rtm_score.setRange(0.10, 0.95)
         self.spin_rtm_score.setSingleStep(0.05)
@@ -330,9 +353,9 @@ class SettingsDialog(QDialog):
         self.spin_rtm_score.valueChanged.connect(
             lambda v: setattr(self.config, "rtm_score_thr", float(v))
         )
-        engine_layout.addWidget(self.spin_rtm_score, 1, 1)
+        engine_layout.addWidget(self.spin_rtm_score, 2, 1)
 
-        engine_layout.addWidget(QLabel("Mode Pelacakan:"), 2, 0)
+        engine_layout.addWidget(QLabel("Mode Pelacakan:"), 3, 0)
         self.combo_tracking_mode = QComboBox()
         self.combo_tracking_mode.addItem("Seluruh Tangan (21 Titik)", "full_hand")
         self.combo_tracking_mode.addItem("Pusat Tangan", "palm_center")
@@ -340,7 +363,11 @@ class SettingsDialog(QDialog):
         mode_idx_map = {"full_hand": 0, "palm_center": 1, "fingertips": 2}
         self.combo_tracking_mode.setCurrentIndex(mode_idx_map.get(self.config.hand_tracking_mode, 0))
         self.combo_tracking_mode.currentIndexChanged.connect(self.on_tracking_mode_changed)
-        engine_layout.addWidget(self.combo_tracking_mode, 2, 1)
+        engine_layout.addWidget(self.combo_tracking_mode, 3, 1)
+
+        is_yolo = self.config.hand_backend == "yolo26n"
+        self.edit_yolo_model.setEnabled(is_yolo)
+        self.btn_browse_yolo.setEnabled(is_yolo)
 
         layout.addWidget(engine_group)
 
@@ -606,6 +633,20 @@ class SettingsDialog(QDialog):
 
     def on_backend_changed(self) -> None:
         self.config.hand_backend = self.combo_backend.currentData()
+        is_yolo = self.config.hand_backend == "yolo26n"
+        self.edit_yolo_model.setEnabled(is_yolo)
+        self.btn_browse_yolo.setEnabled(is_yolo)
+
+    def on_browse_yolo_model(self) -> None:
+        filepath, _ = QFileDialog.getOpenFileName(
+            self,
+            "Pilih Model YOLO Pose",
+            "",
+            "YOLO Models (*.pt *.onnx *.engine);;All Files (*)",
+        )
+        if filepath:
+            self.edit_yolo_model.setText(filepath)
+            self.config.yolo_model_path = filepath
 
     def on_tracking_mode_changed(self) -> None:
         self.config.hand_tracking_mode = self.combo_tracking_mode.currentData()
@@ -674,8 +715,9 @@ class SettingsDialog(QDialog):
         self.chk_show_crop_box.setChecked(self.config.show_crop_box)
         self.on_use_roi_crop_toggled(self.config.use_roi_crop)
 
-        idx_b = 0 if self.config.hand_backend == "rtmlib" else 1
-        self.combo_backend.setCurrentIndex(idx_b)
+        backend_idx_map = {"rtmlib": 0, "mediapipe": 1, "yolo26n": 2}
+        self.combo_backend.setCurrentIndex(backend_idx_map.get(self.config.hand_backend, 0))
+        self.edit_yolo_model.setText(self.config.yolo_model_path)
         self.spin_rtm_score.setValue(self.config.rtm_score_thr)
 
         mode_map = {"full_hand": 0, "palm_center": 1, "fingertips": 2}
@@ -735,6 +777,13 @@ class MainWindow(QMainWindow):
         self.config = AppConfig.load()
         self.roi_cards: List[ROICardWidget] = []
         self.worker = CameraWorker(self.config, self)
+
+        # State UI untuk kontrol frame video & perekaman
+        self._is_scrubbing_slider: bool = False
+        self._last_video_path: str = ""
+        self._last_video_total: int = 0
+        self._is_video_mode_ui: bool = False
+        self._is_recording_ui: bool = False
 
         self._apply_dark_theme()
         self._build_ui()
@@ -884,6 +933,19 @@ class MainWindow(QMainWindow):
         header_bar.addWidget(title_lbl)
         header_bar.addStretch()
 
+        self.btn_open_video = QPushButton("Buka Video (Ctrl+O)")
+        self.btn_open_video.setStyleSheet(
+            "background-color: #1f5f35; border-color: #3fb950; font-weight: bold; padding: 6px 14px;"
+        )
+        self.btn_open_video.clicked.connect(self.action_open_video)
+
+        self.btn_live_cam = QPushButton("Kamera Live")
+        self.btn_live_cam.setStyleSheet(
+            "background-color: #21262d; border-color: #30363d; font-weight: bold; padding: 6px 12px;"
+        )
+        self.btn_live_cam.clicked.connect(self.action_switch_to_camera)
+        self.btn_live_cam.setVisible(False)
+
         btn_settings = QPushButton("Pengaturan (Ctrl+,)")
         btn_settings.setStyleSheet("background-color: #1f4f82; border-color: #58a6ff; font-weight: bold; padding: 6px 14px;")
         btn_settings.clicked.connect(self.open_settings_dialog)
@@ -898,6 +960,8 @@ class MainWindow(QMainWindow):
         btn_reset_roi.setStyleSheet("background-color: #491217; border-color: #f85149;")
         btn_reset_roi.clicked.connect(self.action_reset_roi)
 
+        header_bar.addWidget(self.btn_open_video)
+        header_bar.addWidget(self.btn_live_cam)
         header_bar.addWidget(btn_settings)
         header_bar.addWidget(btn_clear_cycle)
         header_bar.addWidget(btn_recapture_ref)
@@ -922,6 +986,10 @@ class MainWindow(QMainWindow):
         self.canvas = VideoCanvas()
         left_layout.addWidget(self.banner_lbl)
         left_layout.addWidget(self.canvas, stretch=1)
+
+        # Panel Kontrol Frame & Video Input/Output
+        self.video_ctrl_frame = self._build_video_control_panel()
+        left_layout.addWidget(self.video_ctrl_frame)
 
         # Panel Kanan
         right_panel = QWidget()
@@ -1041,6 +1109,124 @@ class MainWindow(QMainWindow):
         self.status_bar.addWidget(self.cam_status_lbl, 1)
         self.status_bar.addPermanentWidget(self.ref_status_lbl)
 
+    def _build_video_control_panel(self) -> QGroupBox:
+        group = QGroupBox("Kontrol Frame & Video (Input / Output)")
+        layout = QVBoxLayout(group)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(6)
+
+        # Baris 1: Navigasi & Pemilihan Frame oleh Pengguna
+        nav_row = QHBoxLayout()
+        nav_row.setSpacing(6)
+
+        self.btn_play_pause = QPushButton("▶ Putar")
+        self.btn_play_pause.setFixedWidth(90)
+        self.btn_play_pause.setStyleSheet(
+            "background-color: #1f4f82; border-color: #58a6ff; font-weight: bold; padding: 5px 8px;"
+        )
+        self.btn_play_pause.clicked.connect(self.action_toggle_video_play)
+        self.btn_play_pause.setEnabled(False)
+
+        self.btn_prev_frame = QPushButton("◀ -1")
+        self.btn_prev_frame.setFixedWidth(52)
+        self.btn_prev_frame.setToolTip("Mundur 1 frame")
+        self.btn_prev_frame.clicked.connect(lambda: self.worker.step_video_frame(-1))
+        self.btn_prev_frame.setEnabled(False)
+
+        self.btn_next_frame = QPushButton("+1 ▶")
+        self.btn_next_frame.setFixedWidth(52)
+        self.btn_next_frame.setToolTip("Maju 1 frame")
+        self.btn_next_frame.clicked.connect(lambda: self.worker.step_video_frame(1))
+        self.btn_next_frame.setEnabled(False)
+
+        self.slider_frame = QSlider(Qt.Orientation.Horizontal)
+        self.slider_frame.setRange(0, 0)
+        self.slider_frame.setEnabled(False)
+        self.slider_frame.sliderPressed.connect(self._on_slider_pressed)
+        self.slider_frame.sliderReleased.connect(self._on_slider_released)
+        self.slider_frame.valueChanged.connect(self._on_slider_frame_changed)
+
+        lbl_frame_title = QLabel("Frame:")
+        lbl_frame_title.setStyleSheet("color: #8b949e; font-size: 12px;")
+
+        self.spin_current_frame = QSpinBox()
+        self.spin_current_frame.setRange(0, 0)
+        self.spin_current_frame.setFixedWidth(85)
+        self.spin_current_frame.setEnabled(False)
+        self.spin_current_frame.valueChanged.connect(self._on_spin_current_frame_changed)
+
+        self.lbl_total_frames = QLabel("/ 0 (00:00.0)")
+        self.lbl_total_frames.setStyleSheet("color: #8b949e; font-size: 11px; min-width: 95px;")
+
+        nav_row.addWidget(self.btn_play_pause)
+        nav_row.addWidget(self.btn_prev_frame)
+        nav_row.addWidget(self.btn_next_frame)
+        nav_row.addWidget(self.slider_frame, stretch=1)
+        nav_row.addWidget(lbl_frame_title)
+        nav_row.addWidget(self.spin_current_frame)
+        nav_row.addWidget(self.lbl_total_frames)
+        layout.addLayout(nav_row)
+
+        # Baris 2: Penentuan Frame Referensi & Rentang Frame Ekspor Video Output
+        range_row = QHBoxLayout()
+        range_row.setSpacing(6)
+
+        self.btn_lock_ref_frame = QPushButton("Jadikan Frame Ini Referensi")
+        self.btn_lock_ref_frame.setToolTip(
+            "Kunci frame yang sedang tampil saat ini sebagai referensi background bersih"
+        )
+        self.btn_lock_ref_frame.setStyleSheet(
+            "background-color: #21262d; border-color: #58a6ff; color: #58a6ff; font-size: 11px; padding: 5px 10px;"
+        )
+        self.btn_lock_ref_frame.clicked.connect(self.action_lock_current_frame_ref)
+
+        lbl_start = QLabel("Frame Awal:")
+        lbl_start.setStyleSheet("color: #8b949e; font-size: 11px;")
+        self.spin_start_frame = QSpinBox()
+        self.spin_start_frame.setRange(0, 0)
+        self.spin_start_frame.setFixedWidth(78)
+        self.spin_start_frame.setEnabled(False)
+        self.spin_start_frame.valueChanged.connect(self._on_frame_range_changed)
+
+        self.btn_set_start_curr = QPushButton("Set Saat Ini")
+        self.btn_set_start_curr.setStyleSheet("font-size: 11px; padding: 4px 6px;")
+        self.btn_set_start_curr.setToolTip("Gunakan nomor frame saat ini sebagai Frame Awal")
+        self.btn_set_start_curr.clicked.connect(self._set_start_from_current)
+        self.btn_set_start_curr.setEnabled(False)
+
+        lbl_end = QLabel("Frame Akhir:")
+        lbl_end.setStyleSheet("color: #8b949e; font-size: 11px;")
+        self.spin_end_frame = QSpinBox()
+        self.spin_end_frame.setRange(0, 0)
+        self.spin_end_frame.setFixedWidth(78)
+        self.spin_end_frame.setEnabled(False)
+        self.spin_end_frame.valueChanged.connect(self._on_frame_range_changed)
+
+        self.btn_set_end_curr = QPushButton("Set Saat Ini")
+        self.btn_set_end_curr.setStyleSheet("font-size: 11px; padding: 4px 6px;")
+        self.btn_set_end_curr.setToolTip("Gunakan nomor frame saat ini sebagai Frame Akhir")
+        self.btn_set_end_curr.clicked.connect(self._set_end_from_current)
+        self.btn_set_end_curr.setEnabled(False)
+
+        self.btn_record_output = QPushButton("Simpan Video Output...")
+        self.btn_record_output.setStyleSheet(
+            "background-color: #1f5f35; border-color: #3fb950; font-weight: bold; padding: 5px 12px;"
+        )
+        self.btn_record_output.clicked.connect(self.action_toggle_recording)
+
+        range_row.addWidget(self.btn_lock_ref_frame)
+        range_row.addStretch()
+        range_row.addWidget(lbl_start)
+        range_row.addWidget(self.spin_start_frame)
+        range_row.addWidget(self.btn_set_start_curr)
+        range_row.addWidget(lbl_end)
+        range_row.addWidget(self.spin_end_frame)
+        range_row.addWidget(self.btn_set_end_curr)
+        range_row.addWidget(self.btn_record_output)
+        layout.addLayout(range_row)
+
+        return group
+
     def _rebuild_roi_cards(self, count: int) -> None:
         for card in self.roi_cards:
             self.roi_cards_layout.removeWidget(card)
@@ -1059,6 +1245,11 @@ class MainWindow(QMainWindow):
         self.add_log_entry("INFO", f"Nama ROI #{idx + 1} diubah menjadi: [{name}].")
 
     def _setup_shortcuts(self) -> None:
+        act_o = QAction(self)
+        act_o.setShortcut(QKeySequence("Ctrl+O"))
+        act_o.triggered.connect(self.action_open_video)
+        self.addAction(act_o)
+
         act_r = QAction(self)
         act_r.setShortcut(QKeySequence("Ctrl+R"))
         act_r.triggered.connect(self.action_reset_roi)
@@ -1120,6 +1311,13 @@ class MainWindow(QMainWindow):
         self.log_list.addItem(item)
         self.log_list.scrollToBottom()
 
+    @staticmethod
+    def _format_sec(sec: float) -> str:
+        sec = max(0.0, float(sec))
+        m = int(sec // 60)
+        s = sec - m * 60
+        return f"{m:02d}:{s:04.1f}"
+
     @pyqtSlot(dict)
     def on_telemetry_updated(self, data: dict) -> None:
         self.banner_lbl.setText(data["banner_text"])
@@ -1151,17 +1349,229 @@ class MainWindow(QMainWindow):
                 self.config.ambang_rasio,
             )
 
-        engine_str = "RTMlib (RTMPose)" if self.config.hand_backend == "rtmlib" else "Google MediaPipe"
+        # Sinkronisasi kontrol video & penentuan frame oleh pengguna
+        is_video = bool(data.get("is_video_mode", False))
+        v_path = str(data.get("video_path", ""))
+        v_total = int(data.get("video_total_frames", 0))
+        v_curr = int(data.get("video_current_frame", 0))
+        v_start = int(data.get("video_start_frame", 0))
+        v_end = int(data.get("video_end_frame", max(0, v_total - 1)))
+        v_paused = bool(data.get("video_paused", True))
+        v_fps = float(data.get("video_fps", 30.0) or 30.0)
+        is_rec = bool(data.get("is_recording", False))
+        rec_count = int(data.get("recorded_frames_count", 0))
+
+        if is_video != self._is_video_mode_ui:
+            self._is_video_mode_ui = is_video
+            self.btn_live_cam.setVisible(is_video)
+            self.btn_play_pause.setEnabled(is_video)
+            self.btn_prev_frame.setEnabled(is_video)
+            self.btn_next_frame.setEnabled(is_video)
+            self.slider_frame.setEnabled(is_video)
+            self.spin_current_frame.setEnabled(is_video)
+            self.spin_start_frame.setEnabled(is_video)
+            self.spin_end_frame.setEnabled(is_video)
+            self.btn_set_start_curr.setEnabled(is_video)
+            self.btn_set_end_curr.setEnabled(is_video)
+            if not is_video:
+                self.lbl_total_frames.setText("/ 0 (Live)")
+                self._last_video_path = ""
+                self._last_video_total = 0
+
+        if is_video:
+            max_idx = max(0, v_total - 1)
+            if v_path != self._last_video_path or v_total != self._last_video_total:
+                self._last_video_path = v_path
+                self._last_video_total = v_total
+                for w in (self.slider_frame, self.spin_current_frame, self.spin_start_frame, self.spin_end_frame):
+                    w.blockSignals(True)
+                    w.setRange(0, max_idx)
+                self.spin_start_frame.setValue(v_start)
+                self.spin_end_frame.setValue(v_end)
+                for w in (self.slider_frame, self.spin_current_frame, self.spin_start_frame, self.spin_end_frame):
+                    w.blockSignals(False)
+
+            self.btn_play_pause.setText("▶ Putar" if v_paused else "⏸ Jeda")
+
+            if not self._is_scrubbing_slider:
+                self.slider_frame.blockSignals(True)
+                self.slider_frame.setValue(v_curr)
+                self.slider_frame.blockSignals(False)
+
+            if not self.spin_current_frame.hasFocus():
+                self.spin_current_frame.blockSignals(True)
+                self.spin_current_frame.setValue(v_curr)
+                self.spin_current_frame.blockSignals(False)
+
+            curr_sec = v_curr / v_fps if v_fps > 0 else 0.0
+            tot_sec = max_idx / v_fps if v_fps > 0 else 0.0
+            self.lbl_total_frames.setText(
+                f"/ {max_idx} ({self._format_sec(curr_sec)} / {self._format_sec(tot_sec)})"
+            )
+
+        if is_rec != self._is_recording_ui or is_rec:
+            self._is_recording_ui = is_rec
+            if is_rec:
+                self.btn_record_output.setText(f"⏹ Stop & Simpan ({rec_count} f)")
+                self.btn_record_output.setStyleSheet(
+                    "background-color: #6e1920; border-color: #f85149; font-weight: bold; padding: 5px 12px;"
+                )
+            else:
+                self.btn_record_output.setText("Simpan Video Output...")
+                self.btn_record_output.setStyleSheet(
+                    "background-color: #1f5f35; border-color: #3fb950; font-weight: bold; padding: 5px 12px;"
+                )
+
+        if self.config.hand_backend == "rtmlib":
+            engine_str = "RTMlib (RTMPose)"
+        elif self.config.hand_backend == "yolo26n":
+            model_name = os.path.basename(self.config.yolo_model_path or "yolo26n-pose.pt")
+            engine_str = f"YOLO26n-Pose ({model_name})"
+        else:
+            engine_str = "Google MediaPipe"
+        rec_str = f" | [REC: {rec_count} frame]" if is_rec else ""
         if data["has_reference"]:
-            self.ref_status_lbl.setText(f"Engine: {engine_str} | Referensi: Tersimpan | FPS: {data['fps']:.1f}")
+            self.ref_status_lbl.setText(
+                f"Engine: {engine_str} | Referensi: Tersimpan | FPS: {data['fps']:.1f}{rec_str}"
+            )
         else:
             self.ref_status_lbl.setText(
-                f"Engine: {engine_str} | Referensi: Menunggu ({data['roi_defined']}/{data['roi_total']} ROI) | FPS: {data['fps']:.1f}"
+                f"Engine: {engine_str} | Referensi: Menunggu ({data['roi_defined']}/{data['roi_total']} ROI) | FPS: {data['fps']:.1f}{rec_str}"
             )
 
     @pyqtSlot(str)
     def on_camera_info(self, info: str) -> None:
         self.cam_status_lbl.setText(info)
+
+    # =========================================================================
+    # Handler Kontrol Video, Penentuan Frame, dan Perekaman Output
+    # =========================================================================
+    def action_open_video(self) -> None:
+        filepath, _ = QFileDialog.getOpenFileName(
+            self,
+            "Pilih File Video Input",
+            "",
+            "Video Files (*.mp4 *.avi *.mkv *.mov *.wmv);;All Files (*)",
+        )
+        if filepath:
+            self.worker.open_video_file(filepath)
+
+    def action_switch_to_camera(self) -> None:
+        self.worker.request_camera_switch(self.config.camera_index)
+
+    def action_toggle_video_play(self) -> None:
+        self.worker.toggle_video_play()
+
+    def _on_slider_pressed(self) -> None:
+        self._is_scrubbing_slider = True
+        self.worker.set_video_paused(True)
+
+    def _on_slider_released(self) -> None:
+        self._is_scrubbing_slider = False
+        val = self.slider_frame.value()
+        self.spin_current_frame.blockSignals(True)
+        self.spin_current_frame.setValue(val)
+        self.spin_current_frame.blockSignals(False)
+        self.worker.seek_video_frame(val)
+
+    def _on_slider_frame_changed(self, val: int) -> None:
+        self.spin_current_frame.blockSignals(True)
+        self.spin_current_frame.setValue(val)
+        self.spin_current_frame.blockSignals(False)
+        self.worker.seek_video_frame(val)
+
+    def _on_spin_current_frame_changed(self, val: int) -> None:
+        self.slider_frame.blockSignals(True)
+        self.slider_frame.setValue(val)
+        self.slider_frame.blockSignals(False)
+        self.worker.set_video_paused(True)
+        self.worker.seek_video_frame(val)
+
+    def _on_frame_range_changed(self) -> None:
+        sf = self.spin_start_frame.value()
+        ef = self.spin_end_frame.value()
+        if sf > ef:
+            if self.sender() == self.spin_start_frame:
+                self.spin_end_frame.blockSignals(True)
+                self.spin_end_frame.setValue(sf)
+                self.spin_end_frame.blockSignals(False)
+                ef = sf
+            else:
+                self.spin_start_frame.blockSignals(True)
+                self.spin_start_frame.setValue(ef)
+                self.spin_start_frame.blockSignals(False)
+                sf = ef
+        self.worker.set_video_frame_range(sf, ef)
+
+    def _set_start_from_current(self) -> None:
+        curr = self.spin_current_frame.value()
+        self.spin_start_frame.setValue(curr)
+        self.add_log_entry("INFO", f"Frame Awal diatur ke Frame #{curr}.")
+
+    def _set_end_from_current(self) -> None:
+        curr = self.spin_current_frame.value()
+        self.spin_end_frame.setValue(curr)
+        self.add_log_entry("INFO", f"Frame Akhir diatur ke Frame #{curr}.")
+
+    def action_lock_current_frame_ref(self, roi_mode: Optional[str] = None) -> None:
+        if isinstance(roi_mode, str) and roi_mode in ("keep", "add", "reset"):
+            self.worker.lock_current_frame_as_ref(roi_mode=roi_mode)
+            return
+
+        if self._is_video_mode_ui:
+            self.worker.set_video_paused(True)
+
+        msg_box = QMessageBox(self)
+        msg_box.setWindowTitle("Jadikan Frame Ini Referensi")
+        msg_box.setIcon(QMessageBox.Icon.Question)
+        curr_roi_count = len(self.config.saved_rois)
+        msg_box.setText(
+            "Frame saat ini akan dikunci sebagai referensi background bersih.\n\n"
+            f"Pilih pengaturan ROI yang ingin digunakan (ROI aktif saat ini: {curr_roi_count}):"
+        )
+
+        btn_keep = msg_box.addButton("Gunakan ROI Saat Ini", QMessageBox.ButtonRole.AcceptRole)
+        btn_add = msg_box.addButton("Tambah ROI Baru", QMessageBox.ButtonRole.ActionRole)
+        btn_reset = msg_box.addButton("Buat Ulang Semua ROI", QMessageBox.ButtonRole.ResetRole)
+        btn_cancel = msg_box.addButton("Batal", QMessageBox.ButtonRole.RejectRole)
+        msg_box.setDefaultButton(btn_keep)
+
+        msg_box.exec()
+        clicked = msg_box.clickedButton()
+        if clicked == btn_cancel or clicked is None:
+            return
+        if clicked == btn_add:
+            self.worker.lock_current_frame_as_ref(roi_mode="add")
+        elif clicked == btn_reset:
+            self.worker.lock_current_frame_as_ref(roi_mode="reset")
+        else:
+            self.worker.lock_current_frame_as_ref(roi_mode="keep")
+
+    def action_toggle_recording(self) -> None:
+        if self._is_recording_ui:
+            self.worker.stop_video_recording()
+            return
+
+        default_name = "output_annotated.mp4"
+        if self._last_video_path:
+            base, _ = os.path.splitext(self._last_video_path)
+            default_name = f"{base}_annotated.mp4"
+
+        out_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Simpan Video Output Teranotasi",
+            default_name,
+            "MP4 Video (*.mp4);;AVI Video (*.avi)",
+        )
+        if not out_path:
+            return
+
+        if self._is_video_mode_ui:
+            sf = self.spin_start_frame.value()
+            ef = self.spin_end_frame.value()
+            self.worker.start_video_recording(out_path, start_frame=sf, end_frame=ef)
+        else:
+            self.worker.start_video_recording(out_path)
 
     def action_reset_roi(self) -> None:
         reply = QMessageBox.question(
@@ -1183,6 +1593,13 @@ class MainWindow(QMainWindow):
     def action_reset_parts(self) -> None:
         self.worker.trigger_reset_parts()
 
+    def shutdown_all(self) -> None:
+        """Mematikan thread worker dan memastikan seluruh kamera dilepas."""
+        try:
+            self.worker.stop()
+        finally:
+            release_all_cameras()
+
     def closeEvent(self, event) -> None:
         reply = QMessageBox.question(
             self,
@@ -1194,14 +1611,18 @@ class MainWindow(QMainWindow):
         if reply != QMessageBox.StandardButton.Yes:
             event.ignore()
             return
-        self.status_bar.showMessage("Menutup aplikasi dan mematikan kamera...", 1000)
-        self.worker.stop()
+        self.status_bar.showMessage("Menutup aplikasi dan mematikan seluruh kamera...", 1000)
+        self.shutdown_all()
         event.accept()
 
 
 def main() -> None:
     app = QApplication(sys.argv)
     window = MainWindow()
-    app.aboutToQuit.connect(window.worker.stop)
+    app.aboutToQuit.connect(window.shutdown_all)
     window.show()
-    sys.exit(app.exec())
+    try:
+        exit_code = app.exec()
+    finally:
+        window.shutdown_all()
+    sys.exit(exit_code)

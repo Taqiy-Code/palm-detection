@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import atexit
+import os
 import queue
 import threading
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 import cv2
 import numpy as np
@@ -26,6 +28,45 @@ from palm_detection.vision import (
     siapkan_gray,
 )
 
+# Registri global seluruh instance cv2.VideoCapture aktif agar dijamin mati saat aplikasi keluar
+_ACTIVE_CAPTURES: List[cv2.VideoCapture] = []
+_ACTIVE_CAPTURES_LOCK = threading.RLock()
+
+
+def _register_capture(cap: Optional[cv2.VideoCapture]) -> None:
+    if cap is None:
+        return
+    with _ACTIVE_CAPTURES_LOCK:
+        if cap not in _ACTIVE_CAPTURES:
+            _ACTIVE_CAPTURES.append(cap)
+
+
+def _release_capture_safe(cap: Optional[cv2.VideoCapture]) -> None:
+    if cap is None:
+        return
+    with _ACTIVE_CAPTURES_LOCK:
+        if cap in _ACTIVE_CAPTURES:
+            _ACTIVE_CAPTURES.remove(cap)
+    try:
+        cap.release()
+    except Exception:
+        pass
+
+
+def release_all_cameras() -> None:
+    """Mematikan dan melepas seluruh kamera/VideoCapture yang masih tercatat aktif."""
+    with _ACTIVE_CAPTURES_LOCK:
+        captures = list(_ACTIVE_CAPTURES)
+        _ACTIVE_CAPTURES.clear()
+    for cap in captures:
+        try:
+            cap.release()
+        except Exception:
+            pass
+
+
+atexit.register(release_all_cameras)
+
 
 class CameraWorker(QThread):
     """Thread pekerja yang mengorkestrasi akuisisi video, deteksi tangan, dan evaluasi langkah."""
@@ -41,11 +82,35 @@ class CameraWorker(QThread):
         self.running = False
         self._is_stopped = False
         self._stop_lock = threading.Lock()
+        self._cap_lock = threading.RLock()
+        self._opened_captures: List[cv2.VideoCapture] = []
 
-        # State kamera (HANYA dibuat, diakses, dan dirilis oleh thread worker)
+        # State kamera & video (HANYA dibuat, diakses, dan dirilis secara thread-safe)
         self.cap: Optional[cv2.VideoCapture] = None
         self.frame_w = config.frame_width
         self.frame_h = config.frame_height
+
+        # State Input Video & Kontrol Frame oleh Pengguna
+        self.is_video_mode: bool = False
+        self.video_path: Optional[str] = None
+        self.video_paused: bool = True
+        self.video_fps: float = 30.0
+        self.video_total_frames: int = 0
+        self.video_current_frame: int = 0
+        self.video_start_frame: int = 0
+        self.video_end_frame: int = 0
+        self._raw_frame: Optional[np.ndarray] = None
+        self._needs_process_current: bool = False
+        self._step_once: bool = False
+        self._manual_ref_locked: bool = False
+        self._cached_detect_key: Optional[tuple] = None
+        self._cached_detect_res: Optional[Tuple[List[dict], List[Tuple[int, int, int, int]], np.ndarray]] = None
+
+        # State Perekaman / Output Video Teranotasi
+        self.video_writer: Optional[cv2.VideoWriter] = None
+        self.is_recording: bool = False
+        self.recording_path: Optional[str] = None
+        self.recorded_frames_count: int = 0
 
         # State ROI
         self.rois: List[np.ndarray] = []
@@ -97,6 +162,46 @@ class CameraWorker(QThread):
     def request_camera_switch(self, new_index: int) -> None:
         self.post_command("switch_camera", int(new_index))
 
+    def open_video_file(self, filepath: str) -> None:
+        self.post_command("open_video", str(filepath))
+
+    def set_video_paused(self, paused: bool) -> None:
+        self.post_command("set_video_paused", bool(paused))
+
+    def toggle_video_play(self) -> None:
+        self.post_command("toggle_video_play", None)
+
+    def seek_video_frame(self, frame_idx: int) -> None:
+        self.post_command("seek_video", int(frame_idx))
+
+    def step_video_frame(self, delta: int) -> None:
+        self.post_command("step_video", int(delta))
+
+    def set_video_frame_range(self, start_frame: int, end_frame: int) -> None:
+        self.post_command("set_video_range", (int(start_frame), int(end_frame)))
+
+    def lock_current_frame_as_ref(self, roi_mode: str = "keep") -> None:
+        """Mengunci frame saat ini sebagai referensi bersih dengan opsi penanganan ROI.
+
+        Args:
+            roi_mode:
+                - "keep"  : Gunakan ROI saat ini yang sudah ada.
+                - "add"   : Tambahkan ROI baru di atas frame referensi ini.
+                - "reset" : Hapus ROI lama dan buat ulang ROI dari awal pada frame ini.
+        """
+        self.post_command("lock_current_ref", str(roi_mode))
+
+    def start_video_recording(
+        self,
+        output_path: str,
+        start_frame: Optional[int] = None,
+        end_frame: Optional[int] = None,
+    ) -> None:
+        self.post_command("start_recording", (str(output_path), start_frame, end_frame))
+
+    def stop_video_recording(self) -> None:
+        self.post_command("stop_recording", None)
+
     def update_camera_hardware(self, prop_name: str, value) -> None:
         setattr(self.config, prop_name, value)
         self.post_command("update_cam_prop", (prop_name, value))
@@ -139,22 +244,201 @@ class CameraWorker(QThread):
         self.post_command("set_jumlah_roi", int(count))
 
     # =========================================================================
-    # Pengelolaan Kamera (Hanya berjalan di worker thread)
+    # Pengelolaan Kamera & Video (Hanya berjalan di worker thread)
     # =========================================================================
-    def _open_camera(self) -> bool:
-        if self.cap is not None:
+    def _stop_recording_internal(self, completed: bool = False) -> None:
+        if self.video_writer is not None:
             try:
-                self.cap.release()
+                self.video_writer.release()
             except Exception:
                 pass
-            self.cap = None
+            self.video_writer = None
+
+        if self.is_recording:
+            saved_path = self.recording_path or ""
+            frames_written = self.recorded_frames_count
+            self.is_recording = False
+            self.recording_path = None
+            status_msg = "selesai diproses dan disimpan" if completed else "dihentikan dan disimpan"
+            self.log_event.emit(
+                LogLevel.SUCCESS.value,
+                f"Video output ({frames_written} frame) {status_msg}: {saved_path}",
+            )
+
+    def _start_recording_internal(
+        self,
+        output_path: str,
+        start_frame: Optional[int],
+        end_frame: Optional[int],
+    ) -> bool:
+        self._stop_recording_internal(completed=False)
+        if self.cap is None or not self.cap.isOpened():
+            self.log_event.emit(LogLevel.WARN.value, "Gagal merekam: Sumber video/kamera belum aktif.")
+            return False
+
+        if self.is_video_mode:
+            max_idx = max(0, self.video_total_frames - 1)
+            sf = max(0, min(int(start_frame) if start_frame is not None else self.video_start_frame, max_idx))
+            ef = max(sf, min(int(end_frame) if end_frame is not None else self.video_end_frame, max_idx))
+            self.video_start_frame = sf
+            self.video_end_frame = ef
+            self._seek_to_frame(sf)
+            self._needs_process_current = True
+            self.sequencer.clear_statuses()
+            self._init_post_hand_frames()
+            if not self._manual_ref_locked and self.referensi is None:
+                self._no_hand_frames = 0
+                self._stable_ref_buffer.clear()
+            self.video_paused = False
+            out_fps = self.video_fps if self.video_fps > 0 else 30.0
+        else:
+            out_fps = float(self.cap.get(cv2.CAP_PROP_FPS) or 30.0)
+            if out_fps <= 1.0 or out_fps > 120.0 or np.isnan(out_fps):
+                out_fps = 30.0
+
+        ext = os.path.splitext(output_path)[1].lower()
+        if ext == ".avi":
+            fourcc = cv2.VideoWriter_fourcc(*"XVID")
+        else:
+            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+
+        writer = cv2.VideoWriter(output_path, fourcc, out_fps, (self.frame_w, self.frame_h))
+        if not writer.isOpened():
+            self.log_event.emit(LogLevel.WARN.value, f"Gagal membuat file video output: {output_path}")
+            return False
+
+        self.video_writer = writer
+        self.is_recording = True
+        self.recording_path = output_path
+        self.recorded_frames_count = 0
+        if self.is_video_mode:
+            self.log_event.emit(
+                LogLevel.INFO.value,
+                f"Memulai perekaman output video (Frame #{self.video_start_frame} s/d #{self.video_end_frame}) -> {os.path.basename(output_path)}",
+            )
+        else:
+            self.log_event.emit(
+                LogLevel.INFO.value,
+                f"Memulai perekaman kamera live -> {os.path.basename(output_path)}",
+            )
+        return True
+
+    def _seek_to_frame(self, target_idx: int) -> bool:
+        if not self.is_video_mode or self.cap is None or not self.cap.isOpened():
+            return False
+        max_idx = max(0, self.video_total_frames - 1)
+        clamped = max(0, min(int(target_idx), max_idx))
+        self.cap.set(cv2.CAP_PROP_POS_FRAMES, clamped)
+        ok, f = self.cap.read()
+        if ok and f is not None:
+            self._raw_frame = f.copy()
+            self.video_current_frame = clamped
+            self._prev_gray = siapkan_gray(f)
+            self._cached_detect_key = None
+            return True
+        return False
+
+    def _release_all_worker_captures(self) -> None:
+        """Melepas seluruh instance VideoCapture yang pernah dibuka oleh worker ini."""
+        with self._cap_lock:
+            if self.cap is not None:
+                _release_capture_safe(self.cap)
+                self.cap = None
+            while self._opened_captures:
+                c = self._opened_captures.pop()
+                _release_capture_safe(c)
+
+    def _open_video(self, filepath: str) -> bool:
+        if self._is_stopped:
+            return False
+        self._stop_recording_internal(completed=False)
+        if not os.path.exists(filepath):
+            self.log_event.emit(LogLevel.WARN.value, f"File video tidak ditemukan: {filepath}")
+            return False
+
+        c = cv2.VideoCapture(filepath)
+        _register_capture(c)
+        if not c.isOpened():
+            _release_capture_safe(c)
+            self.log_event.emit(LogLevel.WARN.value, f"Gagal membuka file video: {filepath}")
+            return False
+
+        ok, first_frame = c.read()
+        if not ok or first_frame is None:
+            _release_capture_safe(c)
+            self.log_event.emit(LogLevel.WARN.value, f"Gagal membaca frame dari video: {filepath}")
+            return False
+
+        with self._cap_lock:
+            self._release_all_worker_captures()
+            self.cap = c
+            self._opened_captures.append(c)
+
+        self.is_video_mode = True
+        self.video_path = filepath
+        self.video_paused = True
+        self._step_once = False
+        self._needs_process_current = False
+
+        total = int(c.get(cv2.CAP_PROP_FRAME_COUNT))
+        v_fps = float(c.get(cv2.CAP_PROP_FPS) or 30.0)
+        if v_fps <= 1.0 or v_fps > 240.0 or np.isnan(v_fps):
+            v_fps = 30.0
+
+        self.video_fps = v_fps
+        self.video_total_frames = max(1, total)
+        self.video_current_frame = 0
+        self.video_start_frame = 0
+        self.video_end_frame = max(0, self.video_total_frames - 1)
+
+        self._raw_frame = first_frame.copy()
+        self._cached_detect_key = None
+        self.frame_h, self.frame_w = first_frame.shape[:2]
+        if self.rois:
+            self._rebuild_masks()
+
+        self._invalidate_reference()
+        self.sequencer.clear_statuses()
+        self._init_post_hand_frames()
+        self._prev_gray = siapkan_gray(first_frame)
+
+        fname = os.path.basename(filepath)
+        self.camera_info_ready.emit(
+            f"Video: {fname} ({self.frame_w}x{self.frame_h} @ {self.video_fps:.1f} FPS) | Total: {self.video_total_frames} frame"
+        )
+        self.log_event.emit(
+            LogLevel.INFO.value,
+            f"Video '{fname}' dimuat ({self.video_total_frames} frame). Silakan pilih frame untuk atur ROI / Referensi.",
+        )
+        return True
+
+    def _open_camera(self) -> bool:
+        if self._is_stopped:
+            return False
+        self._stop_recording_internal(completed=False)
+        self.is_video_mode = False
+        self.video_path = None
+        self.video_paused = False
+        self._raw_frame = None
+        self._cached_detect_key = None
+
+        self._release_all_worker_captures()
 
         def _try_open(idx: int):
+            if self._is_stopped:
+                return None, None
             c = cv2.VideoCapture(idx, cv2.CAP_DSHOW)
+            _register_capture(c)
             if not c.isOpened():
-                c.release()
+                _release_capture_safe(c)
+                if self._is_stopped:
+                    return None, None
                 c = cv2.VideoCapture(idx)
+                _register_capture(c)
             if c.isOpened():
+                if self._is_stopped:
+                    _release_capture_safe(c)
+                    return None, None
                 c.set(cv2.CAP_PROP_FRAME_WIDTH, self.config.frame_width)
                 c.set(cv2.CAP_PROP_FRAME_HEIGHT, self.config.frame_height)
                 if hasattr(cv2, "CAP_PROP_READ_TIMEOUT_MSEC"):
@@ -163,14 +447,18 @@ class CameraWorker(QThread):
                     except Exception:
                         pass
                 success, f = c.read()
-                if success and f is not None:
+                if success and f is not None and not self._is_stopped:
                     return c, f
-                c.release()
+                _release_capture_safe(c)
+            else:
+                _release_capture_safe(c)
             return None, None
 
         cap_obj, frame = _try_open(self.config.camera_index)
-        if cap_obj is None:
+        if cap_obj is None and not self._is_stopped:
             for alt_idx in [1, 0, 2]:
+                if self._is_stopped:
+                    break
                 if alt_idx == self.config.camera_index:
                     continue
                 cap_obj, frame = _try_open(alt_idx)
@@ -178,12 +466,22 @@ class CameraWorker(QThread):
                     self.config.camera_index = alt_idx
                     break
 
+        if self._is_stopped:
+            if cap_obj is not None:
+                _release_capture_safe(cap_obj)
+            return False
+
         if cap_obj is None or not cap_obj.isOpened():
+            if cap_obj is not None:
+                _release_capture_safe(cap_obj)
             self.cap = None
             self.camera_info_ready.emit(f"Gagal membuka Kamera Index {self.config.camera_index}")
             return False
 
-        self.cap = cap_obj
+        with self._cap_lock:
+            self.cap = cap_obj
+            self._opened_captures.append(cap_obj)
+
         if frame is not None:
             self.frame_h, self.frame_w = frame.shape[:2]
 
@@ -225,8 +523,11 @@ class CameraWorker(QThread):
             cv2.fillPoly(m, [poly], 255)
             self.masks.append(m)
 
-    def _invalidate_reference(self) -> None:
+    def _invalidate_reference(self, force: bool = True) -> None:
+        if not force and self._manual_ref_locked and self.referensi is not None:
+            return
         self.referensi = None
+        self._manual_ref_locked = False
         self._no_hand_frames = 0
         self._stable_ref_buffer.clear()
 
@@ -235,27 +536,24 @@ class CameraWorker(QThread):
         self.masks.clear()
         self.titik_klik.clear()
         self._redo_roi_idx = None
-        self._invalidate_reference()
+        self._invalidate_reference(force=True)
         self.sequencer.reset(self.config.jumlah_roi)
         self._init_post_hand_frames()
 
     def _cleanup_resources(self) -> None:
-        """Melepas kamera dan model AI di akhir eksekusi thread worker."""
-        if self.cap is not None:
-            try:
-                self.cap.release()
-            except Exception as e:
-                print(f"[Peringatan] Gagal merilis VideoCapture: {e}")
-            finally:
-                self.cap = None
-
-        self.pipeline.close()
+        """Melepas seluruh kamera, perekam video, dan model AI secara idempoten."""
+        with self._cap_lock:
+            self._stop_recording_internal(completed=False)
+            self._release_all_worker_captures()
+            release_all_cameras()
+            self.pipeline.close()
 
     # =========================================================================
     # Pemrosesan Perintah Masuk dari GUI Thread
     # =========================================================================
     def _process_pending_commands(self, gray_now: Optional[np.ndarray]) -> None:
         cam_props_to_apply: dict = {}
+        pending_seek_target: Optional[int] = None
 
         while True:
             try:
@@ -269,6 +567,103 @@ class CameraWorker(QThread):
             elif cmd == "switch_camera":
                 self.config.camera_index = int(arg)
                 self._open_camera()
+
+            elif cmd == "open_video":
+                self._open_video(str(arg))
+
+            elif cmd == "set_video_paused":
+                if self.is_video_mode:
+                    self.video_paused = bool(arg)
+                    if not self.video_paused and self.video_current_frame >= self.video_end_frame:
+                        self._seek_to_frame(self.video_start_frame)
+                        self._needs_process_current = True
+
+            elif cmd == "toggle_video_play":
+                if self.is_video_mode:
+                    self.video_paused = not self.video_paused
+                    if not self.video_paused and self.video_current_frame >= self.video_end_frame:
+                        self._seek_to_frame(self.video_start_frame)
+                        self._needs_process_current = True
+
+            elif cmd == "seek_video":
+                if self.is_video_mode:
+                    pending_seek_target = int(arg)
+
+            elif cmd == "step_video":
+                if self.is_video_mode:
+                    delta = int(arg)
+                    self.video_paused = True
+                    if delta == 1 and pending_seek_target is None and self.video_current_frame < self.video_total_frames - 1:
+                        self._step_once = True
+                    else:
+                        base_frame = pending_seek_target if pending_seek_target is not None else self.video_current_frame
+                        pending_seek_target = max(0, min(base_frame + delta, max(0, self.video_total_frames - 1)))
+
+            elif cmd == "set_video_range":
+                if self.is_video_mode:
+                    sf, ef = arg
+                    max_idx = max(0, self.video_total_frames - 1)
+                    self.video_start_frame = max(0, min(int(sf), max_idx))
+                    self.video_end_frame = max(self.video_start_frame, min(int(ef), max_idx))
+
+            elif cmd == "lock_current_ref":
+                roi_mode = str(arg or "keep").lower()
+                src_gray = None
+                if self._raw_frame is not None:
+                    src_gray = siapkan_gray(self._raw_frame)
+                elif gray_now is not None:
+                    src_gray = gray_now.copy()
+
+                if src_gray is not None:
+                    if self.is_video_mode:
+                        self.video_paused = True
+
+                    if roi_mode == "reset":
+                        self.rois.clear()
+                        self.masks.clear()
+                        self.titik_klik.clear()
+                        self._redo_roi_idx = None
+                    elif roi_mode == "add":
+                        self.titik_klik.clear()
+                        self._redo_roi_idx = None
+                        if len(self.rois) >= self.config.jumlah_roi:
+                            self.config.jumlah_roi = len(self.rois) + 1
+
+                    self.referensi = src_gray
+                    self._manual_ref_locked = True
+                    needed = max(1, int(self.config.ref_clean_frames))
+                    self._no_hand_frames = needed
+                    self._stable_ref_buffer = [src_gray.copy() for _ in range(needed)]
+                    self.sequencer.reset(self.config.jumlah_roi)
+                    self._init_post_hand_frames()
+
+                    frame_label = (
+                        f"Frame #{self.video_current_frame}" if self.is_video_mode else "Frame saat ini"
+                    )
+                    if roi_mode == "add":
+                        self.log_event.emit(
+                            LogLevel.INFO.value,
+                            f"{frame_label} dikunci sebagai referensi. Silakan klik 4 sudut pada video untuk menambahkan ROI #{len(self.rois) + 1}.",
+                        )
+                    elif roi_mode == "reset":
+                        self.log_event.emit(
+                            LogLevel.INFO.value,
+                            f"{frame_label} dikunci sebagai referensi. Silakan klik 4 sudut pada video untuk membuat ROI baru.",
+                        )
+                    else:
+                        self.log_event.emit(
+                            LogLevel.SUCCESS.value,
+                            f"{frame_label} dikunci sebagai referensi background bersih (menggunakan {len(self.rois)} ROI saat ini).",
+                        )
+
+            elif cmd == "start_recording":
+                out_path, sf, ef = arg
+                self._start_recording_internal(out_path, sf, ef)
+
+            elif cmd == "stop_recording":
+                self._stop_recording_internal(completed=False)
+                if self.is_video_mode:
+                    self.video_paused = True
 
             elif cmd == "update_cam_prop":
                 prop_name, val = arg
@@ -292,7 +687,7 @@ class CameraWorker(QThread):
                     else:
                         self.log_event.emit("WARN", "Satu ROI tersimpan diabaikan karena poligon tidak valid.")
                 self._rebuild_masks()
-                self._invalidate_reference()
+                self._invalidate_reference(force=False)
 
             elif cmd == "redo_roi":
                 idx = int(arg)
@@ -327,8 +722,8 @@ class CameraWorker(QThread):
                 self._rebuild_masks()
                 self.config.saved_rois = [r.tolist() for r in self.rois]
                 self.config.save(CONFIG_FILE)
-                self._invalidate_reference()
-                self.log_event.emit("INFO", "Bentuk sudut ROI diperbarui. Menunggu area bersih untuk referensi.")
+                self._invalidate_reference(force=False)
+                self.log_event.emit("INFO", "Bentuk sudut ROI diperbarui.")
 
             elif cmd == "undo_point":
                 if self.titik_klik:
@@ -359,7 +754,7 @@ class CameraWorker(QThread):
                             self._redo_roi_idx = None
                             self.config.saved_rois = [r.tolist() for r in self.rois]
                             self.config.save(CONFIG_FILE)
-                            self._invalidate_reference()
+                            self._invalidate_reference(force=False)
                             r_name = self.config.get_roi_name(target_idx)
                             self.log_event.emit("SUCCESS", f"{r_name} berhasil digambar ulang dan disimpan.")
                 elif len(self.rois) < self.config.jumlah_roi:
@@ -376,11 +771,11 @@ class CameraWorker(QThread):
                             self.masks.append(m)
                             self.config.saved_rois = [r.tolist() for r in self.rois]
                             self.config.save(CONFIG_FILE)
-                            self._invalidate_reference()
+                            self._invalidate_reference(force=False)
 
             elif cmd == "recapture_ref":
                 if len(self.rois) == self.config.jumlah_roi:
-                    self._invalidate_reference()
+                    self._invalidate_reference(force=True)
                     self.sequencer.clear_statuses()
                     self.log_event.emit("INFO", "Menunggu area kerja bersih untuk mengambil referensi baru...")
 
@@ -393,8 +788,11 @@ class CameraWorker(QThread):
                 self.sequencer.reset_parts()
                 self.log_event.emit("INFO", "Counter Part telah direset ke 0.")
 
-        # Terapkan perubahan setting hardware kamera
-        if cam_props_to_apply and self.cap is not None and self.cap.isOpened():
+        if pending_seek_target is not None and self.is_video_mode:
+            self._seek_to_frame(pending_seek_target)
+
+        # Terapkan perubahan setting hardware kamera (hanya pada mode kamera live)
+        if cam_props_to_apply and not self.is_video_mode and self.cap is not None and self.cap.isOpened():
             for name, val in cam_props_to_apply.items():
                 if name == "auto_focus":
                     self.cap.set(cv2.CAP_PROP_AUTOFOCUS, 1 if val else 0)
@@ -444,16 +842,60 @@ class CameraWorker(QThread):
         fps = 0.0
 
         while self.running:
+            loop_start = time.perf_counter()
+            self._process_pending_commands(self._prev_gray)
+
             if self.cap is None or not self.cap.isOpened():
                 time.sleep(0.05)
-                self._process_pending_commands(None)
                 continue
 
-            ok, frame = self.cap.read()
-            if not self.running:
-                break
-            if not ok or frame is None:
-                time.sleep(0.01)
+            is_new_frame = False
+            frame: Optional[np.ndarray] = None
+
+            if not self.is_video_mode:
+                ok, raw = self.cap.read()
+                if not self.running:
+                    break
+                if not ok or raw is None:
+                    time.sleep(0.01)
+                    continue
+                self._raw_frame = raw
+                frame = raw.copy()
+                is_new_frame = True
+            else:
+                should_advance = (not self.video_paused) or self._step_once
+                self._step_once = False
+
+                if should_advance:
+                    if self._needs_process_current and self._raw_frame is not None:
+                        self._needs_process_current = False
+                        frame = self._raw_frame.copy()
+                        is_new_frame = True
+                    elif self.video_current_frame >= self.video_end_frame:
+                        if self.is_recording:
+                            self._stop_recording_internal(completed=True)
+                        self.video_paused = True
+                        if self._raw_frame is not None:
+                            frame = self._raw_frame.copy()
+                    else:
+                        ok, raw = self.cap.read()
+                        if ok and raw is not None:
+                            self.video_current_frame += 1
+                            self._raw_frame = raw.copy()
+                            frame = raw.copy()
+                            is_new_frame = True
+                        else:
+                            if self.is_recording:
+                                self._stop_recording_internal(completed=True)
+                            self.video_paused = True
+                            if self._raw_frame is not None:
+                                frame = self._raw_frame.copy()
+                else:
+                    if self._raw_frame is not None:
+                        frame = self._raw_frame.copy()
+
+            if frame is None:
+                time.sleep(0.02)
                 continue
 
             # Sinkronisasi ukuran
@@ -466,7 +908,6 @@ class CameraWorker(QThread):
                     self._rebuild_masks()
 
             gray_now = siapkan_gray(frame)
-            self._process_pending_commands(gray_now)
 
             now = time.perf_counter()
             dt = now - prev_time
@@ -536,11 +977,45 @@ class CameraWorker(QThread):
             # MODE 2: MONITORING DETEKSI & VERIFIKASI LANGKAH
             # -----------------------------------------------------------------
             else:
-                tangan, crop_boxes = self.pipeline.detect_hands(
-                    frame=frame,
-                    rois=self.rois,
-                    config=self.config,
+                detect_key = (
+                    self.video_current_frame if self.is_video_mode else -1,
+                    tuple(r.tobytes() for r in self.rois),
+                    self.config.use_roi_crop,
+                    self.config.roi_crop_mode,
+                    self.config.roi_crop_padding,
+                    self.config.use_clahe,
+                    self.config.clahe_clip_limit,
+                    self.config.clahe_invert_dark,
+                    self.config.show_clahe_preview,
+                    self.config.hand_backend,
+                    self.config.rtm_score_thr,
+                    self.config.yolo_model_path,
                 )
+                if (
+                    not is_new_frame
+                    and self.is_video_mode
+                    and self._cached_detect_key == detect_key
+                    and self._cached_detect_res is not None
+                ):
+                    tangan, crop_boxes, cached_bgr = self._cached_detect_res
+                    if self.config.show_clahe_preview:
+                        np.copyto(frame, cached_bgr)
+                else:
+                    try:
+                        tangan, crop_boxes = self.pipeline.detect_hands(
+                            frame=frame,
+                            rois=self.rois,
+                            config=self.config,
+                        )
+                    except Exception as exc:
+                        self.log_event.emit(
+                            LogLevel.WARN.value,
+                            f"Gagal menjalankan backend '{self.config.hand_backend}': {exc}",
+                        )
+                        tangan, crop_boxes = [], [(0, 0, w, h)]
+                    if self.is_video_mode:
+                        self._cached_detect_key = detect_key
+                        self._cached_detect_res = (tangan, crop_boxes, frame.copy())
 
                 # Deteksi gerak antar frame (fallback)
                 motion_ratios = [
@@ -555,24 +1030,25 @@ class CameraWorker(QThread):
                 ]
                 any_roi_motion = any(mr >= self.config.motion_fallback_thr for mr in motion_ratios)
 
-                # Stabilisasi referensi bersih
+                # Stabilisasi referensi bersih (hanya dihitung pada frame baru)
                 needed_clean = max(1, int(self.config.ref_clean_frames))
-                if len(tangan) == 0 and not any_roi_motion:
-                    self._no_hand_frames += 1
-                    self._stable_ref_buffer.append(gray_now.copy())
-                    if len(self._stable_ref_buffer) > needed_clean:
-                        self._stable_ref_buffer.pop(0)
-                else:
-                    self._no_hand_frames = 0
-                    self._stable_ref_buffer.clear()
+                if is_new_frame:
+                    if len(tangan) == 0 and not any_roi_motion:
+                        self._no_hand_frames += 1
+                        self._stable_ref_buffer.append(gray_now.copy())
+                        if len(self._stable_ref_buffer) > needed_clean:
+                            self._stable_ref_buffer.pop(0)
+                    else:
+                        self._no_hand_frames = 0
+                        self._stable_ref_buffer.clear()
 
-                if self.referensi is None or self.referensi.shape != gray_now.shape:
-                    if self._no_hand_frames >= needed_clean and len(self._stable_ref_buffer) >= needed_clean:
-                        self.referensi = np.mean(self._stable_ref_buffer, axis=0).astype(np.uint8)
-                        self.log_event.emit(
-                            LogLevel.INFO.value,
-                            f"Referensi background bersih berhasil dikunci (rata-rata {needed_clean} frame stabil).",
-                        )
+                    if self.referensi is None or self.referensi.shape != gray_now.shape:
+                        if self._no_hand_frames >= needed_clean and len(self._stable_ref_buffer) >= needed_clean:
+                            self.referensi = np.mean(self._stable_ref_buffer, axis=0).astype(np.uint8)
+                            self.log_event.emit(
+                                LogLevel.INFO.value,
+                                f"Referensi background bersih berhasil dikunci (rata-rata {needed_clean} frame stabil).",
+                            )
 
                 # Visualisasi batas crop
                 if self.config.use_roi_crop and self.config.show_crop_box:
@@ -635,44 +1111,47 @@ class CameraWorker(QThread):
                         roi_state = RoiState.DONE
                         teks = "DONE"
                     elif idx == aktif:
-                        # Langkah aktif: proses masuk
-                        if self.sequencer.statuses[idx] == self.sequencer.statuses[idx].WAITING:
-                            _, debounce_info = self.sequencer.process_step_entry(idx, tangan_masuk_roi)
+                        if is_new_frame:
+                            # Langkah aktif: proses masuk
+                            if self.sequencer.statuses[idx] == self.sequencer.statuses[idx].WAITING:
+                                _, debounce_info = self.sequencer.process_step_entry(idx, tangan_masuk_roi)
 
-                        # Langkah aktif: proses keluar
-                        if self.sequencer.statuses[idx] == self.sequencer.statuses[idx].HAND_IN:
-                            if not ada_tangan_atau_gerak:
-                                self._post_hand_frames[idx].append(gray_now.copy())
-                                if len(self._post_hand_frames[idx]) > 5:
-                                    self._post_hand_frames[idx].pop(0)
-                            else:
-                                self._post_hand_frames[idx].clear()
-
-                            should_eval, debounce_info = self.sequencer.process_step_exit(
-                                idx, ada_tangan_atau_gerak
-                            )
-                            if should_eval:
-                                if self._post_hand_frames[idx]:
-                                    gray_after = np.mean(self._post_hand_frames[idx], axis=0).astype(np.uint8)
+                            # Langkah aktif: proses keluar
+                            if self.sequencer.statuses[idx] == self.sequencer.statuses[idx].HAND_IN:
+                                if not ada_tangan_atau_gerak:
+                                    self._post_hand_frames[idx].append(gray_now.copy())
+                                    if len(self._post_hand_frames[idx]) > 5:
+                                        self._post_hand_frames[idx].pop(0)
                                 else:
-                                    gray_after = gray_now
-                                self._post_hand_frames[idx].clear()
+                                    self._post_hand_frames[idx].clear()
 
-                                ratio = rasio_perubahan(
-                                    gray_after,
-                                    self.referensi,
-                                    self.masks[idx],
-                                    self.config.ambang_piksel,
-                                    self._morph_kernel,
+                                should_eval, debounce_info = self.sequencer.process_step_exit(
+                                    idx, ada_tangan_atau_gerak
                                 )
-                                r_name = self.config.get_roi_name(idx)
-                                _, evt = self.sequencer.finalize_step_exit(idx, ratio, r_name)
-                                self.log_event.emit(evt.level.value, evt.message)
+                                if should_eval:
+                                    if self._post_hand_frames[idx]:
+                                        gray_after = np.mean(self._post_hand_frames[idx], axis=0).astype(np.uint8)
+                                    else:
+                                        gray_after = gray_now
+                                    self._post_hand_frames[idx].clear()
+
+                                    ratio = rasio_perubahan(
+                                        gray_after,
+                                        self.referensi,
+                                        self.masks[idx],
+                                        self.config.ambang_piksel,
+                                        self._morph_kernel,
+                                    )
+                                    r_name = self.config.get_roi_name(idx)
+                                    _, evt = self.sequencer.finalize_step_exit(idx, ratio, r_name)
+                                    self.log_event.emit(evt.level.value, evt.message)
 
                         if self.sequencer.statuses[idx] == self.sequencer.statuses[idx].DONE:
                             roi_state = RoiState.DONE
                             teks = "DONE"
-                        elif self.sequencer.statuses[idx] == self.sequencer.statuses[idx].HAND_IN:
+                        elif self.sequencer.statuses[idx] == self.sequencer.statuses[idx].HAND_IN or (
+                            not is_new_frame and tangan_masuk_roi
+                        ):
                             roi_state = RoiState.HAND_IN
                             teks = "Tangan di ROI"
                         else:
@@ -680,7 +1159,10 @@ class CameraWorker(QThread):
                             teks = "Aktif"
                     else:
                         # Langkah terkunci
-                        is_err = self.sequencer.process_locked_step(idx, tangan_masuk_roi, debounce_err)
+                        if is_new_frame:
+                            is_err = self.sequencer.process_locked_step(idx, tangan_masuk_roi, debounce_err)
+                        else:
+                            is_err = tangan_masuk_roi or (self.sequencer.error_counts[idx] >= debounce_err)
                         if is_err:
                             salah_urut = idx
                             roi_state = RoiState.ERROR
@@ -713,14 +1195,23 @@ class CameraWorker(QThread):
                 # Banner Text & Auto-Cycle Completion
                 aktif_now = self.sequencer.get_active_step()
                 if self.referensi is None:
-                    banner_text = (
-                        f"MENUNGGU AREA BERSIH: Jauhkan tangan dari ROI ({self._no_hand_frames}/{needed_clean})..."
-                    )
+                    if self.is_video_mode and self.video_paused:
+                        banner_text = (
+                            f"PILIH FRAME REFERENSI: Geser ke frame bersih lalu klik 'Jadikan Frame Ini Referensi' "
+                            f"atau Putar video ({self._no_hand_frames}/{needed_clean})"
+                        )
+                    else:
+                        banner_text = (
+                            f"MENUNGGU AREA BERSIH: Jauhkan tangan dari ROI ({self._no_hand_frames}/{needed_clean})..."
+                        )
                     banner_state = BannerState.SETUP
                 elif aktif_now is None:
-                    is_done, cooldown_expired, part_evt = self.sequencer.handle_cycle_completion(now)
-                    if part_evt:
-                        self.log_event.emit(part_evt.level.value, part_evt.message)
+                    if is_new_frame:
+                        is_done, cooldown_expired, part_evt = self.sequencer.handle_cycle_completion(now)
+                        if part_evt:
+                            self.log_event.emit(part_evt.level.value, part_evt.message)
+                    else:
+                        cooldown_expired = False
 
                     banner_state = BannerState.DONE
                     if cooldown_expired:
@@ -745,7 +1236,7 @@ class CameraWorker(QThread):
                         wrong_name = self.config.get_roi_name(salah_urut)
                         banner_text = f"URUTAN SALAH! Kerjakan [{target_name}], bukan [{wrong_name}]"
                         banner_state = BannerState.ERROR
-                        if now - self.sequencer.last_error_log_time > 2.0:
+                        if is_new_frame and now - self.sequencer.last_error_log_time > 2.0:
                             self.sequencer.last_error_log_time = now
                             self.log_event.emit(
                                 LogLevel.WARN.value,
@@ -756,7 +1247,27 @@ class CameraWorker(QThread):
                         banner_text = f"Ambil [{step_name}] pada ROI {aktif_now + 1}"
                         banner_state = BannerState.ACTIVE
 
-            self._prev_gray = gray_now.copy()
+            if is_new_frame:
+                self._prev_gray = gray_now.copy()
+
+            # Tulis frame teranotasi penuh ke file video output jika sedang merekam
+            if self.is_recording and self.video_writer is not None and is_new_frame:
+                try:
+                    self.video_writer.write(frame)
+                    self.recorded_frames_count += 1
+                except Exception as e:
+                    self.log_event.emit(LogLevel.WARN.value, f"Gagal menulis frame ke video output: {e}")
+                    self._stop_recording_internal(completed=False)
+
+            # Jika telah mencapai frame akhir saat perekaman video, selesaikan otomatis
+            if (
+                self.is_video_mode
+                and self.is_recording
+                and is_new_frame
+                and self.video_current_frame >= self.video_end_frame
+            ):
+                self._stop_recording_internal(completed=True)
+                self.video_paused = True
 
             # Konversi BGR -> QImage dan pancarkan sinyal
             rgb_out = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -775,15 +1286,45 @@ class CameraWorker(QThread):
                 "roi_total": jumlah_roi,
                 "steps_completed": self.sequencer.get_steps_completed(),
                 "parts_completed": self.sequencer.parts_completed,
+                "is_video_mode": self.is_video_mode,
+                "video_path": self.video_path or "",
+                "video_paused": self.video_paused,
+                "video_fps": self.video_fps,
+                "video_total_frames": self.video_total_frames,
+                "video_current_frame": self.video_current_frame,
+                "video_start_frame": self.video_start_frame,
+                "video_end_frame": self.video_end_frame,
+                "is_recording": self.is_recording,
+                "recording_path": self.recording_path or "",
+                "recorded_frames_count": self.recorded_frames_count,
             })
 
+            # Pacing loop pada mode video
+            if self.is_video_mode:
+                if self.video_paused:
+                    time.sleep(0.03)
+                elif not self.is_recording and self.video_fps > 0:
+                    elapsed = time.perf_counter() - loop_start
+                    target_dt = 1.0 / self.video_fps
+                    if elapsed < target_dt:
+                        time.sleep(max(0.001, target_dt - elapsed))
+
     def stop(self) -> None:
-        """Menghentikan thread secara aman, non-blocking, dan idempoten tanpa terminate()."""
+        """Menghentikan thread secara aman, mengosongkan antrian, dan mematikan seluruh kamera."""
         with self._stop_lock:
-            if self._is_stopped:
-                return
             self._is_stopped = True
             self.running = False
 
-        # Tunggu thread keluar dari loop run() dengan batas waktu maksimal 600ms
-        self.wait(600)
+        # Kosongkan antrian perintah agar tidak ada pembukaan kamera susulan saat shutdown
+        while True:
+            try:
+                self._cmd_queue.get_nowait()
+            except queue.Empty:
+                break
+
+        # Tunggu thread keluar dari loop run() sebelum melepas paksa seluruh resource
+        if self.isRunning() and QThread.currentThread() != self:
+            self.wait(3000)
+
+        # Pastikan seluruh kamera dan perekam video benar-benar dilepas
+        self._cleanup_resources()

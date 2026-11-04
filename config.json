@@ -1,30 +1,31 @@
 {
     "jumlah_roi": 3,
-    "debounce_masuk": 3,
-    "debounce_keluar": 8,
+    "debounce_masuk": 1,
+    "debounce_keluar": 1,
     "ambang_piksel": 30,
     "ambang_rasio": 0.08,
     "hand_overlap_thr": 0.15,
     "motion_fallback_thr": 0.02,
     "ref_clean_frames": 5,
-    "debug_diff": false,
-    "use_clahe": true,
+    "debug_diff": true,
+    "use_clahe": false,
     "clahe_clip_limit": 1.5,
     "clahe_invert_dark": false,
     "show_clahe_preview": false,
     "use_roi_crop": false,
     "roi_crop_mode": "individual",
-    "roi_crop_padding": 30,
-    "show_crop_box": true,
-    "hand_backend": "rtmlib",
+    "roi_crop_padding": 15,
+    "show_crop_box": false,
+    "hand_backend": "mediapipe",
     "rtm_score_thr": 0.5,
+    "yolo_model_path": "yolo26n-pose.pt",
     "hand_tracking_mode": "full_hand",
     "camera_index": 0,
     "frame_width": 1280,
     "frame_height": 720,
-    "auto_focus": true,
-    "auto_exposure": true,
-    "auto_wb": true,
+    "auto_focus": false,
+    "auto_exposure": false,
+    "auto_wb": false,
     "focus": 20,
     "exposure": -6,
     "wb_temp": 4500,
@@ -32,58 +33,62 @@
     "saved_rois": [
         [
             [
-                47,
-                26
+                60,
+                49
             ],
             [
-                36,
-                588
+                66,
+                683
             ],
             [
-                310,
-                582
+                357,
+                710
             ],
             [
-                304,
-                29
+                381,
+                62
             ]
         ],
         [
             [
-                457,
-                50
+                443,
+                51
             ],
             [
-                454,
-                616
+                463,
+                683
             ],
             [
-                840,
-                615
+                894,
+                685
             ],
             [
-                801,
-                45
+                915,
+                75
             ]
         ],
         [
             [
-                878,
-                56
+                981,
+                54
             ],
             [
-                922,
-                629
+                977,
+                714
             ],
             [
-                1235,
-                625
+                1252,
+                707
             ],
             [
-                1225,
-                45
+                1254,
+                73
             ]
         ]
     ],
-    "roi_names": []
+    "roi_names": [
+        "Komponen 1",
+        "Komponen 2",
+        "Komponen 3"
+    ]
 }

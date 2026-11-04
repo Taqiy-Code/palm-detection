@@ -20,6 +20,7 @@ from palm_detection.detector import (
     RTMHandDetector,
     SENDI_PUNGGUNG,
     UJUNG_JARI,
+    YOLOPoseHandDetector,
     preprocess_glove,
 )
 from palm_detection.gui import (
@@ -76,6 +77,7 @@ __all__ = [
     "HandDetector",
     "RTMHandDetector",
     "MediaPipeHandDetector",
+    "YOLOPoseHandDetector",
     "HandDetectionPipeline",
     "preprocess_glove",
     "preprocess_for_mediapipe",

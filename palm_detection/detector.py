@@ -229,6 +229,218 @@ class MediaPipeHandDetector(HandDetector):
             self.tracker = None
 
 
+class YOLOPoseHandDetector(HandDetector):
+    """Implementasi deteksi tangan menggunakan Ultralytics YOLO Pose (mis. yolo26n-pose.pt).
+
+    Mendukung secara otomatis:
+        1. Model Hand Pose 21-keypoint (custom/fine-tuned 21 titik sendi jari).
+        2. Model Pretrained COCO Human Pose 17-keypoint (yolo26n-pose.pt bawaan),
+           dengan ekstraksi pergelangan tangan (wrist kpt 9 & 10) serta proyeksi telapak
+           dari vektor lengan bawah (elbow -> wrist).
+    """
+
+    def __init__(
+        self,
+        model_path: str = "yolo26n-pose.pt",
+        score_thr: float = 0.35,
+        device: str = "cpu",
+    ) -> None:
+        self.model_path = str(model_path or "yolo26n-pose.pt").strip() or "yolo26n-pose.pt"
+        self.score_thr = float(score_thr)
+        self.device = device
+        self.model = None
+
+        from ultralytics import YOLO
+
+        self.model = YOLO(self.model_path)
+
+    @staticmethod
+    def _build_hand_from_wrist(
+        wx: float,
+        wy: float,
+        ex: Optional[float] = None,
+        ey: Optional[float] = None,
+    ) -> dict:
+        """Membentuk representasi 21 titik & kontur telapak dari koordinat wrist (dan elbow opsional)."""
+        if ex is not None and ey is not None and (abs(wx - ex) > 1.0 or abs(wy - ey) > 1.0):
+            dx = float(wx - ex)
+            dy = float(wy - ey)
+            arm_len = float(np.hypot(dx, dy))
+            pc_x = int(round(wx + 0.30 * dx))
+            pc_y = int(round(wy + 0.30 * dy))
+            radius = max(22, min(65, int(round(0.22 * arm_len))))
+            base_angle = float(np.arctan2(dy, dx))
+        else:
+            pc_x = int(round(wx))
+            pc_y = int(round(wy))
+            radius = 32
+            base_angle = -float(np.pi / 2.0)
+
+        wrist_pt = (int(round(wx)), int(round(wy)))
+        keypoints_21: List[Optional[Tuple[int, int]]] = [None] * 21
+        keypoints_21[0] = wrist_pt
+
+        # Sebarkan 5 jari di sekitar arah hadap lengan (base_angle)
+        finger_offsets = [-0.65, -0.32, 0.0, 0.32, 0.65]
+        finger_chains = [
+            (1, 2, 3, 4),
+            (5, 6, 7, 8),
+            (9, 10, 11, 12),
+            (13, 14, 15, 16),
+            (17, 18, 19, 20),
+        ]
+        for f_angle_off, chain in zip(finger_offsets, finger_chains):
+            ang = base_angle + f_angle_off
+            for step_idx, k_idx in enumerate(chain, start=1):
+                r_step = radius * (0.35 + 0.22 * step_idx)
+                px = int(round(pc_x + r_step * np.cos(ang)))
+                py = int(round(pc_y + r_step * np.sin(ang)))
+                keypoints_21[k_idx] = (px, py)
+
+        all_points = [pt for pt in keypoints_21 if pt is not None]
+        fingertips = [keypoints_21[i] for i in UJUNG_JARI if keypoints_21[i] is not None]
+        dorsum_points = [keypoints_21[i] for i in SENDI_PUNGGUNG if keypoints_21[i] is not None]
+        hull = (
+            cv2.convexHull(np.array(all_points, dtype=np.int32))
+            if len(all_points) >= 3
+            else np.empty((0, 1, 2), dtype=np.int32)
+        )
+        return {
+            "fingertips": fingertips,
+            "palm_center": (pc_x, pc_y),
+            "dorsum_points": dorsum_points,
+            "all_points": all_points,
+            "keypoints_21": keypoints_21,
+            "hull": hull,
+        }
+
+    @classmethod
+    def parse_keypoints_array(
+        cls,
+        kpts_xy: np.ndarray,
+        kpts_conf: Optional[np.ndarray],
+        score_thr: float,
+    ) -> List[dict]:
+        """Mengonversi array keypoint hasil prediksi YOLO Pose menjadi list dictionary tangan."""
+        results: List[dict] = []
+        if kpts_xy is None or len(kpts_xy) == 0:
+            return results
+
+        thr = float(score_thr)
+        num_instances = kpts_xy.shape[0]
+
+        for inst_idx in range(num_instances):
+            pts = kpts_xy[inst_idx]
+            num_kpts = pts.shape[0]
+            if num_kpts == 0:
+                continue
+
+            if kpts_conf is not None and inst_idx < len(kpts_conf) and kpts_conf[inst_idx] is not None:
+                scs = [float(s) for s in kpts_conf[inst_idx]]
+            else:
+                scs = [1.0] * num_kpts
+
+            # KASUS 1: Model Hand Pose 21-Keypoint
+            if num_kpts >= 21:
+                pts_21 = pts[:21]
+                scs_21 = scs[:21]
+                valid_mask = [
+                    float(s) >= thr and (float(pt[0]) > 0.5 or float(pt[1]) > 0.5)
+                    for pt, s in zip(pts_21, scs_21)
+                ]
+                valid_count = sum(valid_mask)
+                mean_score = float(np.mean(scs_21)) if len(scs_21) > 0 else 0.0
+                if valid_count < 5 or mean_score < thr:
+                    continue
+
+                raw_points = [(int(round(float(pt[0]))), int(round(float(pt[1])))) for pt in pts_21]
+                keypoints_21 = [raw_points[i] if valid_mask[i] else None for i in range(21)]
+                fingertips = [raw_points[i] for i in UJUNG_JARI if valid_mask[i]]
+                dorsum_points = [raw_points[i] for i in SENDI_PUNGGUNG if valid_mask[i]]
+                all_points = [raw_points[i] for i in range(21) if valid_mask[i]]
+                if not all_points:
+                    continue
+
+                centroid_pts = dorsum_points if dorsum_points else all_points
+                pc_x = int(sum(p[0] for p in centroid_pts) / len(centroid_pts))
+                pc_y = int(sum(p[1] for p in centroid_pts) / len(centroid_pts))
+                hull = (
+                    cv2.convexHull(np.array(all_points, dtype=np.int32))
+                    if len(all_points) >= 3
+                    else np.empty((0, 1, 2), dtype=np.int32)
+                )
+                results.append({
+                    "fingertips": fingertips,
+                    "palm_center": (pc_x, pc_y),
+                    "dorsum_points": dorsum_points,
+                    "all_points": all_points,
+                    "keypoints_21": keypoints_21,
+                    "hull": hull,
+                })
+
+            # KASUS 2: Model Pretrained COCO 17-Keypoint (yolo26n-pose.pt)
+            elif num_kpts == 17:
+                # Pasangan (elbow_idx, wrist_idx): Kiri=(7, 9), Kanan=(8, 10)
+                for elbow_idx, wrist_idx in ((7, 9), (8, 10)):
+                    wx, wy = float(pts[wrist_idx][0]), float(pts[wrist_idx][1])
+                    w_conf = scs[wrist_idx] if wrist_idx < len(scs) else 0.0
+                    if w_conf < thr or (wx <= 1.0 and wy <= 1.0):
+                        continue
+
+                    ex, ey = float(pts[elbow_idx][0]), float(pts[elbow_idx][1])
+                    e_conf = scs[elbow_idx] if elbow_idx < len(scs) else 0.0
+                    if e_conf >= thr * 0.5 and (ex > 1.0 or ey > 1.0):
+                        hand_dict = cls._build_hand_from_wrist(wx, wy, ex, ey)
+                    else:
+                        hand_dict = cls._build_hand_from_wrist(wx, wy, None, None)
+                    results.append(hand_dict)
+
+            # KASUS 3: Jumlah keypoint kustom lainnya
+            else:
+                valid_pts = [
+                    (int(round(float(pt[0]))), int(round(float(pt[1]))))
+                    for pt, s in zip(pts, scs)
+                    if float(s) >= thr and (float(pt[0]) > 0.5 or float(pt[1]) > 0.5)
+                ]
+                if not valid_pts:
+                    continue
+                pc_x = int(sum(p[0] for p in valid_pts) / len(valid_pts))
+                pc_y = int(sum(p[1] for p in valid_pts) / len(valid_pts))
+                hand_dict = cls._build_hand_from_wrist(float(pc_x), float(pc_y), None, None)
+                results.append(hand_dict)
+
+        return results
+
+    def detect(self, crop_bgr: np.ndarray) -> List[dict]:
+        if self.model is None:
+            return []
+        preds = self.model(crop_bgr, verbose=False, conf=self.score_thr)
+        if not preds:
+            return []
+
+        all_detected: List[dict] = []
+        for res in preds:
+            kpts_obj = getattr(res, "keypoints", None)
+            if kpts_obj is None:
+                continue
+            xy = getattr(kpts_obj, "xy", None)
+            if xy is None:
+                continue
+            xy_np = xy.cpu().numpy() if hasattr(xy, "cpu") else np.asarray(xy)
+            conf = getattr(kpts_obj, "conf", None)
+            conf_np = (
+                (conf.cpu().numpy() if hasattr(conf, "cpu") else np.asarray(conf))
+                if conf is not None
+                else None
+            )
+            all_detected.extend(self.parse_keypoints_array(xy_np, conf_np, self.score_thr))
+
+        return all_detected
+
+    def close(self) -> None:
+        self.model = None
+
+
 class HandDetectionPipeline:
     """Mengelola cropping region ROI, filter sarung tangan, deteksi AI, dan pencegahan deteksi ganda."""
 
@@ -236,6 +448,7 @@ class HandDetectionPipeline:
         self.rtm_detector: Optional[RTMHandDetector] = None
         self.mp_detector: Optional[MediaPipeHandDetector] = None
         self.mp_region_detectors: Dict[int, MediaPipeHandDetector] = {}
+        self.yolo_detector: Optional[YOLOPoseHandDetector] = None
 
         self.lut_r = np.clip(np.arange(256) * 1.15, 0, 255).astype(np.uint8)
         self.lut_g = np.clip(np.arange(256) * 0.95, 0, 255).astype(np.uint8)
@@ -247,6 +460,16 @@ class HandDetectionPipeline:
         if self.rtm_detector is None or abs(self.rtm_detector.score_thr - score_thr) > 1e-3:
             self.rtm_detector = RTMHandDetector(score_thr=score_thr)
         return self.rtm_detector
+
+    def get_yolo(self, model_path: str, score_thr: float) -> YOLOPoseHandDetector:
+        norm_path = str(model_path or "yolo26n-pose.pt").strip() or "yolo26n-pose.pt"
+        if (
+            self.yolo_detector is None
+            or self.yolo_detector.model_path != norm_path
+            or abs(self.yolo_detector.score_thr - score_thr) > 1e-3
+        ):
+            self.yolo_detector = YOLOPoseHandDetector(model_path=norm_path, score_thr=score_thr)
+        return self.yolo_detector
 
     def get_mp(self, region_idx: Optional[int] = None) -> MediaPipeHandDetector:
         if region_idx is None:
@@ -261,6 +484,9 @@ class HandDetectionPipeline:
         if self.rtm_detector is not None:
             self.rtm_detector.close()
             self.rtm_detector = None
+        if self.yolo_detector is not None:
+            self.yolo_detector.close()
+            self.yolo_detector = None
         if self.mp_detector is not None:
             self.mp_detector.close()
             self.mp_detector = None
@@ -334,7 +560,7 @@ class HandDetectionPipeline:
 
         all_hands: List[dict] = []
         preview_patches: List[Tuple[int, int, int, int, np.ndarray]] = []
-        is_rtm = (config.hand_backend == "rtmlib")
+        backend_str = str(config.hand_backend)
         use_per_region = (
             config.use_roi_crop and config.roi_crop_mode == "individual" and len(regions) > 1
         )
@@ -368,8 +594,12 @@ class HandDetectionPipeline:
                 crop_feed_bgr = crop
 
             # Panggil detector aktif
-            if is_rtm:
+            if backend_str == "rtmlib":
                 det = self.get_rtm(float(config.rtm_score_thr))
+                detected = det.detect(crop_feed_bgr)
+            elif backend_str == "yolo26n":
+                yolo_path = str(getattr(config, "yolo_model_path", "yolo26n-pose.pt"))
+                det = self.get_yolo(yolo_path, float(config.rtm_score_thr))
                 detected = det.detect(crop_feed_bgr)
             else:
                 det = self.get_mp(region_idx=reg_idx if use_per_region else None)

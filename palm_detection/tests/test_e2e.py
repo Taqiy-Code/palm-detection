@@ -30,12 +30,16 @@ from PyQt5.QtWidgets import QApplication
 
 from palm_detection.config import AppConfig
 from palm_detection.detector import (
+    MODEL_DIR,
     HandDetectionPipeline,
     HandDetector,
     SENDI_PUNGGUNG,
     UJUNG_JARI,
     YOLOPoseHandDetector,
+    ensure_model_dir,
+    list_available_yolo_models,
     preprocess_glove,
+    resolve_yolo_model_path,
 )
 from palm_detection.gui import MainWindow, ROICardWidget, SettingsDialog, VideoCanvas
 from palm_detection.renderer import OverlayRenderer
@@ -333,25 +337,28 @@ class TestDetectorAndRenderer(unittest.TestCase):
                 self.conf = np.array(conf, dtype=np.float32)
                 self.cls = np.array(cls, dtype=np.int32)
 
-        # 3 kotak: 1 valid glove, 1 confidence rendah, 1 koordinat tidak valid
+        # 4 kotak: 1 valid 'gloves', 1 confidence rendah, 1 koordinat tidak valid, 1 class lain ('bulb' -> harus diabaikan)
         mock_boxes = MockBoxes(
             xyxy=[
                 [50.0, 60.0, 150.0, 160.0],
                 [200.0, 200.0, 250.0, 250.0],
                 [100.0, 100.0, 50.0, 50.0],
+                [300.0, 300.0, 400.0, 400.0],
             ],
-            conf=[0.88, 0.20, 0.95],
-            cls=[0, 0, 0],
+            conf=[0.88, 0.20, 0.95, 0.92],
+            cls=[0, 0, 0, 1],
         )
 
-        names_dict = {0: "Sarung Tangan"}
-        hands = YOLOPoseHandDetector.parse_boxes(mock_boxes, names_dict=names_dict, score_thr=0.35)
+        names_dict = {0: "gloves", 1: "bulb"}
+        hands = YOLOPoseHandDetector.parse_boxes(
+            mock_boxes, names_dict=names_dict, score_thr=0.35, target_classes="gloves"
+        )
         self.assertEqual(len(hands), 1)
         glove = hands[0]
         self.assertEqual(glove["palm_center"], (100, 110))
         self.assertEqual(glove["bbox"], (50, 60, 150, 160))
         self.assertAlmostEqual(glove["confidence"], 0.88, places=2)
-        self.assertEqual(glove["label"], "Sarung Tangan")
+        self.assertEqual(glove["label"], "gloves")
         self.assertEqual(len(glove["fingertips"]), 5)
         self.assertEqual(len(glove["keypoints_21"]), 21)
         self.assertIsNotNone(glove["hull"])
@@ -379,6 +386,21 @@ class TestDetectorAndRenderer(unittest.TestCase):
         annotated = frame.copy()
         renderer.draw_hands(annotated, hands, TrackingMode.FULL_HAND)
         self.assertTrue(np.any(annotated[60:160, 50:150] > 0))
+
+        # 4. Uji resolusi path model dari folder palm_detection/model
+        mdir = ensure_model_dir()
+        self.assertTrue(os.path.isdir(mdir))
+        dummy_model_file = os.path.join(mdir, "test_dummy_glove.pt")
+        try:
+            with open(dummy_model_file, "wb") as f:
+                f.write(b"dummy")
+            avail = list_available_yolo_models()
+            self.assertIn("test_dummy_glove.pt", avail)
+            resolved = resolve_yolo_model_path("test_dummy_glove.pt")
+            self.assertEqual(os.path.normcase(resolved), os.path.normcase(dummy_model_file))
+        finally:
+            if os.path.exists(dummy_model_file):
+                os.remove(dummy_model_file)
 
     def test_overlay_renderer_all_modes(self) -> None:
         renderer = OverlayRenderer()

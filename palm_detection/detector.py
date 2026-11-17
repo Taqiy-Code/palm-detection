@@ -11,10 +11,84 @@ Menyediakan:
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+import os
 from typing import Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
+
+try:
+    import mediapipe as mp
+except Exception:
+    mp = None  # type: ignore[assignment]
+
+# Direktori default penyimpanan model YOLO di dalam paket palm_detection/model
+MODEL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "model")
+DEFAULT_YOLO_MODEL = "yolo26n-pose.pt"
+SUPPORTED_MODEL_EXTS = (".pt", ".onnx", ".engine", ".tflite", ".torchscript")
+
+
+def ensure_model_dir() -> str:
+    """Memastikan folder palm_detection/model tersedia dan mengembalikan path absolutnya."""
+    os.makedirs(MODEL_DIR, exist_ok=True)
+    return MODEL_DIR
+
+
+def list_available_yolo_models() -> List[str]:
+    """Mengembalikan daftar nama file model YOLO yang tersedia di folder palm_detection/model."""
+    ensure_model_dir()
+    models: List[str] = []
+    try:
+        for fname in sorted(os.listdir(MODEL_DIR)):
+            full = os.path.join(MODEL_DIR, fname)
+            if os.path.isfile(full) and fname.lower().endswith(SUPPORTED_MODEL_EXTS):
+                models.append(fname)
+    except Exception:
+        pass
+    return models
+
+
+def resolve_yolo_model_path(model_path: Optional[str] = None) -> str:
+    """Menentukan path model YOLO dengan memprioritaskan file di dalam palm_detection/model.
+
+    Urutan pencarian:
+        1. Jika `model_path` adalah path absolut atau relatif yang sudah ada di disk -> gunakan langsung.
+        2. Cari file dengan nama `model_path` (atau basename-nya) di dalam `palm_detection/model/`.
+        3. Jika `model_path` kosong atau default tidak ditemukan tapi ada file model di `palm_detection/model/`,
+           gunakan model pertama yang tersedia di `palm_detection/model/` (atau path di dalam `palm_detection/model/`
+           agar jika Ultralytics mengunduh bobot otomatis, file tersimpan di `palm_detection/model/`).
+    """
+    ensure_model_dir()
+    raw = str(model_path or "").strip()
+
+    if raw:
+        # 1. Path langsung (absolut/relatif terhadap working directory)
+        if os.path.isfile(raw):
+            return os.path.abspath(raw)
+
+        # 2. Cari di dalam palm_detection/model/
+        cand_in_model_dir = os.path.join(MODEL_DIR, raw)
+        if os.path.isfile(cand_in_model_dir):
+            return cand_in_model_dir
+
+        cand_basename = os.path.join(MODEL_DIR, os.path.basename(raw))
+        if os.path.isfile(cand_basename):
+            return cand_basename
+
+    # 3. Jika belum ditemukan, cek apakah ada model lokal di palm_detection/model/
+    available = list_available_yolo_models()
+    if raw == DEFAULT_YOLO_MODEL or not raw:
+        if DEFAULT_YOLO_MODEL in available:
+            return os.path.join(MODEL_DIR, DEFAULT_YOLO_MODEL)
+        if available:
+            return os.path.join(MODEL_DIR, available[0])
+        return os.path.join(MODEL_DIR, DEFAULT_YOLO_MODEL)
+
+    # Jika user mengetik nama model saja (mis. best.pt / yolo11n.pt), arahkan ke dalam MODEL_DIR
+    if not os.path.isabs(raw) and os.path.dirname(raw) == "":
+        return os.path.join(MODEL_DIR, raw)
+
+    return raw
 
 # Indeks keypoint standar 21 sendi tangan
 UJUNG_JARI = [4, 8, 12, 16, 20]      # Thumb, Index, Middle, Ring, Pinky
@@ -244,10 +318,13 @@ class YOLOPoseHandDetector(HandDetector):
         model_path: str = "yolo26n-pose.pt",
         score_thr: float = 0.35,
         device: str = "cpu",
+        target_classes: Optional[str] = "gloves",
     ) -> None:
-        self.model_path = str(model_path or "yolo26n-pose.pt").strip() or "yolo26n-pose.pt"
+        self.raw_model_path = str(model_path or DEFAULT_YOLO_MODEL).strip() or DEFAULT_YOLO_MODEL
+        self.model_path = resolve_yolo_model_path(self.raw_model_path)
         self.score_thr = float(score_thr)
         self.device = device
+        self.target_classes = str(target_classes if target_classes is not None else "gloves").strip()
         self.model = None
 
         from ultralytics import YOLO
@@ -411,14 +488,34 @@ class YOLOPoseHandDetector(HandDetector):
 
         return results
 
+    @staticmethod
+    def _is_class_allowed(class_name: str, target_classes: Optional[str]) -> bool:
+        """Memeriksa apakah nama class sesuai dengan filter target_classes (mis. 'gloves')."""
+        if target_classes is None:
+            return True
+        raw_filter = str(target_classes).strip().lower()
+        if not raw_filter or raw_filter in ("*", "all", "semua"):
+            return True
+
+        allowed_set = {t.strip() for t in raw_filter.split(",") if t.strip()}
+        # Jika "gloves" atau "glove" diminta, terima juga variasinya ("gloves", "glove", "sarung tangan")
+        if "gloves" in allowed_set or "glove" in allowed_set:
+            allowed_set.update({"gloves", "glove", "sarung tangan", "sarung_tangan"})
+
+        norm_name = str(class_name or "").strip().lower()
+        if norm_name in allowed_set:
+            return True
+        return any(tok in norm_name for tok in allowed_set)
+
     @classmethod
     def parse_boxes(
         cls,
         boxes_obj,
         names_dict: Optional[dict] = None,
         score_thr: float = 0.35,
+        target_classes: Optional[str] = "gloves",
     ) -> List[dict]:
-        """Mengonversi bounding box YOLO Object Detection (mis. model deteksi sarung tangan) ke representasi tangan."""
+        """Mengonversi bounding box YOLO Object Detection (hanya class yang sesuai, mis. 'gloves') ke representasi tangan."""
         results: List[dict] = []
         try:
             xyxy_t = getattr(boxes_obj, "xyxy", None)
@@ -447,6 +544,18 @@ class YOLOPoseHandDetector(HandDetector):
             if score < thr:
                 continue
 
+            c_id = int(cls_np[i]) if i < len(cls_np) else 0
+            label = "gloves"
+            if isinstance(names_dict, (dict, list, tuple)):
+                if isinstance(names_dict, dict) and c_id in names_dict:
+                    label = str(names_dict[c_id])
+                elif isinstance(names_dict, (list, tuple)) and 0 <= c_id < len(names_dict):
+                    label = str(names_dict[c_id])
+
+            # Filter berdasarkan nama kelas (default: hanya menerima 'gloves')
+            if names_dict is not None and not cls._is_class_allowed(label, target_classes):
+                continue
+
             x1, y1, x2, y2 = [int(round(float(v))) for v in box[:4]]
             if x2 <= x1 or y2 <= y1:
                 continue
@@ -472,11 +581,6 @@ class YOLOPoseHandDetector(HandDetector):
 
             # Titik punggung/pergelangan di bagian tengah dan bawah kotak
             dorsum = [(cx, cy), (x1, y2), (x2, y2), (cx, y2)]
-
-            c_id = int(cls_np[i]) if i < len(cls_np) else 0
-            label = "Sarung Tangan"
-            if isinstance(names_dict, dict) and c_id in names_dict:
-                label = str(names_dict[c_id])
 
             results.append({
                 "fingertips": fingertips,
@@ -519,10 +623,16 @@ class YOLOPoseHandDetector(HandDetector):
                             all_detected.extend(pose_results)
                             continue
 
-            # 2. Coba deteksi Bounding Boxes (YOLO Object Detection - Sarung Tangan)
+            # 2. Coba deteksi Bounding Boxes (YOLO Object Detection - Sarung Tangan / 'gloves')
             boxes_obj = getattr(res, "boxes", None)
             if boxes_obj is not None and len(boxes_obj) > 0:
-                box_results = self.parse_boxes(boxes_obj, getattr(res, "names", None), self.score_thr)
+                names_dict = getattr(res, "names", None) or getattr(self.model, "names", None)
+                box_results = self.parse_boxes(
+                    boxes_obj,
+                    names_dict,
+                    self.score_thr,
+                    target_classes=self.target_classes,
+                )
                 all_detected.extend(box_results)
 
         return all_detected
@@ -551,14 +661,26 @@ class HandDetectionPipeline:
             self.rtm_detector = RTMHandDetector(score_thr=score_thr)
         return self.rtm_detector
 
-    def get_yolo(self, model_path: str, score_thr: float) -> YOLOPoseHandDetector:
-        norm_path = str(model_path or "yolo26n-pose.pt").strip() or "yolo26n-pose.pt"
+    def get_yolo(
+        self,
+        model_path: str,
+        score_thr: float,
+        target_classes: str = "gloves",
+    ) -> YOLOPoseHandDetector:
+        resolved_path = resolve_yolo_model_path(model_path)
+        norm_target = str(target_classes if target_classes is not None else "gloves").strip()
         if (
             self.yolo_detector is None
-            or self.yolo_detector.model_path != norm_path
+            or self.yolo_detector.model_path != resolved_path
             or abs(self.yolo_detector.score_thr - score_thr) > 1e-3
         ):
-            self.yolo_detector = YOLOPoseHandDetector(model_path=norm_path, score_thr=score_thr)
+            self.yolo_detector = YOLOPoseHandDetector(
+                model_path=resolved_path,
+                score_thr=score_thr,
+                target_classes=norm_target,
+            )
+        else:
+            self.yolo_detector.target_classes = norm_target
         return self.yolo_detector
 
     def get_mp(self, region_idx: Optional[int] = None) -> MediaPipeHandDetector:
@@ -689,7 +811,8 @@ class HandDetectionPipeline:
                 detected = det.detect(crop_feed_bgr)
             elif backend_str in ("yolo26n", "yolo_detect", "yolo"):
                 yolo_path = str(getattr(config, "yolo_model_path", "yolo26n-pose.pt"))
-                det = self.get_yolo(yolo_path, float(config.rtm_score_thr))
+                target_cls = str(getattr(config, "yolo_target_class", "gloves"))
+                det = self.get_yolo(yolo_path, float(config.rtm_score_thr), target_classes=target_cls)
                 detected = det.detect(crop_feed_bgr)
             else:
                 det = self.get_mp(region_idx=reg_idx if use_per_region else None)
@@ -737,6 +860,12 @@ class HandDetectionPipeline:
 YOLOHandDetector = YOLOPoseHandDetector
 
 __all__ = [
+    "MODEL_DIR",
+    "DEFAULT_YOLO_MODEL",
+    "SUPPORTED_MODEL_EXTS",
+    "ensure_model_dir",
+    "list_available_yolo_models",
+    "resolve_yolo_model_path",
     "UJUNG_JARI",
     "SENDI_PUNGGUNG",
     "preprocess_glove",

@@ -39,6 +39,7 @@ from PyQt5.QtWidgets import (
 )
 
 from palm_detection.config import AppConfig, CONFIG_FILE
+from palm_detection.detector import MODEL_DIR, ensure_model_dir, list_available_yolo_models
 from palm_detection.states import BannerState, LogLevel, RoiState
 from palm_detection.worker import CameraWorker, release_all_cameras
 
@@ -333,12 +334,20 @@ class SettingsDialog(QDialog):
         self.combo_backend.currentIndexChanged.connect(self.on_backend_changed)
         engine_layout.addWidget(self.combo_backend, 0, 1)
 
-        engine_layout.addWidget(QLabel("Model YOLO (.pt/.onnx):"), 1, 0)
+        engine_layout.addWidget(QLabel("Model YOLO (palm_detection/model):"), 1, 0)
+        yolo_col = QVBoxLayout()
+        yolo_col.setContentsMargins(0, 0, 0, 0)
+        yolo_col.setSpacing(4)
+
+        self.combo_yolo_model = QComboBox()
+        self.combo_yolo_model.currentIndexChanged.connect(self.on_yolo_combo_selected)
+        yolo_col.addWidget(self.combo_yolo_model)
+
         yolo_row = QHBoxLayout()
         yolo_row.setContentsMargins(0, 0, 0, 0)
         yolo_row.setSpacing(6)
         self.edit_yolo_model = QLineEdit(self.config.yolo_model_path)
-        self.edit_yolo_model.setPlaceholderText("yolo26n-pose.pt atau path model .pt/.onnx")
+        self.edit_yolo_model.setPlaceholderText("Nama file di palm_detection/model atau path .pt/.onnx")
         self.edit_yolo_model.editingFinished.connect(
             lambda: setattr(
                 self.config,
@@ -351,9 +360,24 @@ class SettingsDialog(QDialog):
         self.btn_browse_yolo.clicked.connect(self.on_browse_yolo_model)
         yolo_row.addWidget(self.edit_yolo_model, 1)
         yolo_row.addWidget(self.btn_browse_yolo)
-        engine_layout.addLayout(yolo_row, 1, 1)
+        yolo_col.addLayout(yolo_row)
+        engine_layout.addLayout(yolo_col, 1, 1)
 
-        engine_layout.addWidget(QLabel("Threshold Skor Sendi:"), 2, 0)
+        self._refresh_yolo_model_combo()
+
+        engine_layout.addWidget(QLabel("Filter Nama Kelas YOLO:"), 2, 0)
+        self.edit_yolo_class = QLineEdit(getattr(self.config, "yolo_target_class", "gloves"))
+        self.edit_yolo_class.setPlaceholderText("gloves (kosongkan atau '*' untuk semua kelas)")
+        self.edit_yolo_class.editingFinished.connect(
+            lambda: setattr(
+                self.config,
+                "yolo_target_class",
+                self.edit_yolo_class.text().strip() or "gloves",
+            )
+        )
+        engine_layout.addWidget(self.edit_yolo_class, 2, 1)
+
+        engine_layout.addWidget(QLabel("Threshold Skor Sendi:"), 3, 0)
         self.spin_rtm_score = QDoubleSpinBox()
         self.spin_rtm_score.setRange(0.10, 0.95)
         self.spin_rtm_score.setSingleStep(0.05)
@@ -361,9 +385,9 @@ class SettingsDialog(QDialog):
         self.spin_rtm_score.valueChanged.connect(
             lambda v: setattr(self.config, "rtm_score_thr", float(v))
         )
-        engine_layout.addWidget(self.spin_rtm_score, 2, 1)
+        engine_layout.addWidget(self.spin_rtm_score, 3, 1)
 
-        engine_layout.addWidget(QLabel("Mode Pelacakan:"), 3, 0)
+        engine_layout.addWidget(QLabel("Mode Pelacakan:"), 4, 0)
         self.combo_tracking_mode = QComboBox()
         self.combo_tracking_mode.addItem("Seluruh Tangan (21 Titik)", "full_hand")
         self.combo_tracking_mode.addItem("Pusat Tangan", "palm_center")
@@ -371,11 +395,13 @@ class SettingsDialog(QDialog):
         mode_idx_map = {"full_hand": 0, "palm_center": 1, "fingertips": 2}
         self.combo_tracking_mode.setCurrentIndex(mode_idx_map.get(self.config.hand_tracking_mode, 0))
         self.combo_tracking_mode.currentIndexChanged.connect(self.on_tracking_mode_changed)
-        engine_layout.addWidget(self.combo_tracking_mode, 3, 1)
+        engine_layout.addWidget(self.combo_tracking_mode, 4, 1)
 
         is_yolo = self.config.hand_backend in ("yolo26n", "yolo_detect")
+        self.combo_yolo_model.setEnabled(is_yolo)
         self.edit_yolo_model.setEnabled(is_yolo)
         self.btn_browse_yolo.setEnabled(is_yolo)
+        self.edit_yolo_class.setEnabled(is_yolo)
 
         layout.addWidget(engine_group)
 
@@ -639,22 +665,57 @@ class SettingsDialog(QDialog):
         spin.valueChanged.connect(callback)
         return slider, spin
 
+    def _refresh_yolo_model_combo(self) -> None:
+        models = list_available_yolo_models()
+        self.combo_yolo_model.blockSignals(True)
+        self.combo_yolo_model.clear()
+        if models:
+            for m in models:
+                self.combo_yolo_model.addItem(f"Folder model: {m}", m)
+        else:
+            self.combo_yolo_model.addItem("(Belum ada model di palm_detection/model)", "")
+
+        curr_base = os.path.basename(self.config.yolo_model_path or "")
+        matched_idx = self.combo_yolo_model.findData(curr_base)
+        if matched_idx >= 0:
+            self.combo_yolo_model.setCurrentIndex(matched_idx)
+        self.combo_yolo_model.blockSignals(False)
+
+    def on_yolo_combo_selected(self) -> None:
+        val = self.combo_yolo_model.currentData()
+        if val:
+            self.edit_yolo_model.setText(val)
+            self.config.yolo_model_path = val
+
     def on_backend_changed(self) -> None:
         self.config.hand_backend = self.combo_backend.currentData()
         is_yolo = self.config.hand_backend in ("yolo26n", "yolo_detect")
+        self.combo_yolo_model.setEnabled(is_yolo)
         self.edit_yolo_model.setEnabled(is_yolo)
         self.btn_browse_yolo.setEnabled(is_yolo)
+        self.edit_yolo_class.setEnabled(is_yolo)
+        if is_yolo:
+            self._refresh_yolo_model_combo()
 
     def on_browse_yolo_model(self) -> None:
+        start_dir = ensure_model_dir()
         filepath, _ = QFileDialog.getOpenFileName(
             self,
             "Pilih Model YOLO (.pt / .onnx)",
-            "",
+            start_dir,
             "YOLO Models (*.pt *.onnx *.engine);;All Files (*)",
         )
         if filepath:
-            self.edit_yolo_model.setText(filepath)
-            self.config.yolo_model_path = filepath
+            norm_dir = os.path.normcase(os.path.abspath(start_dir))
+            norm_file = os.path.normcase(os.path.abspath(filepath))
+            if os.path.dirname(norm_file) == norm_dir:
+                rel_name = os.path.basename(filepath)
+                self.edit_yolo_model.setText(rel_name)
+                self.config.yolo_model_path = rel_name
+            else:
+                self.edit_yolo_model.setText(filepath)
+                self.config.yolo_model_path = filepath
+            self._refresh_yolo_model_combo()
 
     def on_tracking_mode_changed(self) -> None:
         self.config.hand_tracking_mode = self.combo_tracking_mode.currentData()
@@ -726,6 +787,8 @@ class SettingsDialog(QDialog):
         backend_idx_map = {"rtmlib": 0, "mediapipe": 1, "yolo26n": 2, "yolo_detect": 3}
         self.combo_backend.setCurrentIndex(backend_idx_map.get(self.config.hand_backend, 0))
         self.edit_yolo_model.setText(self.config.yolo_model_path)
+        self.edit_yolo_class.setText(getattr(self.config, "yolo_target_class", "gloves"))
+        self._refresh_yolo_model_combo()
         self.spin_rtm_score.setValue(self.config.rtm_score_thr)
 
         mode_map = {"full_hand": 0, "palm_center": 1, "fingertips": 2}

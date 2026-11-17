@@ -13,6 +13,14 @@ from __future__ import annotations
 import os
 import sys
 
+# PENTING (Windows DLL Load Order):
+# MediaPipe (_framework_bindings) harus di-import SEBELUM PyQt5 agar inisialisasi
+# DLL C++ / MSVC runtime MediaPipe tidak gagal ("DLL initialization routine failed").
+try:
+    import mediapipe as _mp  # noqa: F401
+except Exception:
+    pass
+
 # Mencegah konflik library Qt antara OpenCV dan PyQt5 pada sistem Linux/Jetson.
 # Menghapus path plugin cv2 dan memprioritaskan direktori platform plugins PyQt5.
 if "QT_QPA_PLATFORM_PLUGIN_PATH" in os.environ and "cv2" in os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"]:
@@ -41,6 +49,8 @@ from palm_detection.gui import (
     main,
 )
 from palm_detection.detector import (
+    DEFAULT_YOLO_MODEL,
+    MODEL_DIR,
     HandDetectionPipeline,
     HandDetector,
     MediaPipeHandDetector,
@@ -49,7 +59,10 @@ from palm_detection.detector import (
     UJUNG_JARI,
     YOLOHandDetector,
     YOLOPoseHandDetector,
+    ensure_model_dir,
+    list_available_yolo_models,
     preprocess_glove,
+    resolve_yolo_model_path,
 )
 from palm_detection.renderer import (
     SAMBUNGAN_TANGAN,
@@ -101,6 +114,11 @@ __all__ = [
     "YOLOPoseHandDetector",
     "YOLOHandDetector",
     "HandDetectionPipeline",
+    "MODEL_DIR",
+    "DEFAULT_YOLO_MODEL",
+    "ensure_model_dir",
+    "list_available_yolo_models",
+    "resolve_yolo_model_path",
     "preprocess_glove",
     "preprocess_for_mediapipe",
     "StepSequencer",

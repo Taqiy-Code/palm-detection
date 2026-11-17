@@ -21,11 +21,19 @@ import threading
 import time
 from typing import Optional
 
+# Pre-load MediaPipe sebelum modul lain yang memuat PyQt5 (seperti CameraWorker)
+# untuk mencegah konflik inisialisasi DLL C++ (_framework_bindings) di Windows.
+try:
+    import mediapipe as _mp  # noqa: F401
+except Exception:
+    pass
+
 import cv2
 import numpy as np
 from flask import Flask, Response, jsonify, render_template_string, request
 
 from palm_detection.config import AppConfig, CONFIG_FILE
+from palm_detection.detector import MODEL_DIR, ensure_model_dir, list_available_yolo_models
 from palm_detection.states import BannerState, HandBackend, LogLevel, RoiState, TrackingMode
 from palm_detection.worker import CameraWorker, release_all_cameras
 
@@ -530,8 +538,15 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     </select>
                 </div>
                 <div class="form-group" id="groupYoloModel">
-                    <label>Path Model YOLO (.pt / .onnx)</label>
-                    <input type="text" id="cfgYoloModel" placeholder="yolo26n-pose.pt">
+                    <label>Model YOLO (palm_detection/model)</label>
+                    <select id="cfgYoloModelSelect" onchange="if(this.value) document.getElementById('cfgYoloModel').value = this.value;">
+                        <option value="">-- Pilih dari palm_detection/model --</option>
+                    </select>
+                    <input type="text" id="cfgYoloModel" placeholder="Nama file di palm_detection/model atau path .pt/.onnx" style="margin-top: 4px;">
+                </div>
+                <div class="form-group" id="groupYoloClass">
+                    <label>Filter Nama Kelas YOLO Object Detection</label>
+                    <input type="text" id="cfgYoloClass" placeholder="gloves" value="gloves">
                 </div>
                 <div class="form-row">
                     <div class="form-group">
@@ -816,19 +831,36 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
         // Modal Settings
         async function openSettings() {
-            const res = await fetch('/api/config');
+            const [res, resModels] = await Promise.all([
+                fetch('/api/config'),
+                fetch('/api/models')
+            ]);
+            if (resModels.ok) {
+                const mData = await resModels.json();
+                const sel = document.getElementById('cfgYoloModelSelect');
+                sel.innerHTML = '<option value="">-- Pilih dari palm_detection/model --</option>';
+                (mData.models || []).forEach(m => {
+                    const opt = document.createElement('option');
+                    opt.value = m;
+                    opt.innerText = m;
+                    sel.appendChild(opt);
+                });
+            }
             if (res.ok) {
                 const cfg = await res.json();
                 document.getElementById('cfgBackend').value = cfg.hand_backend || 'rtmlib';
                 document.getElementById('cfgYoloModel').value = cfg.yolo_model_path || 'yolo26n-pose.pt';
+                document.getElementById('cfgYoloModelSelect').value = cfg.yolo_model_path || '';
+                document.getElementById('cfgYoloClass').value = cfg.yolo_target_class || 'gloves';
                 document.getElementById('cfgTrackMode').value = cfg.hand_tracking_mode || 'full_hand';
                 document.getElementById('cfgJumlahRoi').value = cfg.jumlah_roi || 3;
                 document.getElementById('cfgAmbangPiksel').value = cfg.ambang_piksel || 30;
                 document.getElementById('cfgAmbangRasio').value = ((cfg.ambang_rasio || 0.08) * 100).toFixed(1);
                 document.getElementById('cfgDebounceIn').value = cfg.debounce_masuk || 6;
                 document.getElementById('cfgDebounceOut').value = cfg.debounce_keluar || 12;
-                document.getElementById('cfgCropMode').value = cfg.roi_crop_mode || 'union';
-                document.getElementById('cfgGloveEnhance').value = cfg.enhance_glove ? "true" : "false";
+                document.getElementById('cfgCropMode').value = (cfg.use_roi_crop === false) ? 'none' : (cfg.roi_crop_mode || 'union');
+                const useClahe = (cfg.use_clahe !== undefined) ? cfg.use_clahe : Boolean(cfg.enhance_glove);
+                document.getElementById('cfgGloveEnhance').value = useClahe ? "true" : "false";
             }
             document.getElementById('settingsModal').style.display = 'flex';
         }
@@ -838,17 +870,22 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         }
 
         async function saveSettings() {
+            const cropVal = document.getElementById('cfgCropMode').value;
+            const useClaheVal = document.getElementById('cfgGloveEnhance').value === "true";
             const payload = {
                 hand_backend: document.getElementById('cfgBackend').value,
                 yolo_model_path: document.getElementById('cfgYoloModel').value,
+                yolo_target_class: document.getElementById('cfgYoloClass').value || 'gloves',
                 hand_tracking_mode: document.getElementById('cfgTrackMode').value,
                 jumlah_roi: parseInt(document.getElementById('cfgJumlahRoi').value) || 3,
                 ambang_piksel: parseInt(document.getElementById('cfgAmbangPiksel').value) || 30,
                 ambang_rasio: (parseFloat(document.getElementById('cfgAmbangRasio').value) || 8.0) / 100.0,
                 debounce_masuk: parseInt(document.getElementById('cfgDebounceIn').value) || 6,
                 debounce_keluar: parseInt(document.getElementById('cfgDebounceOut').value) || 12,
-                roi_crop_mode: document.getElementById('cfgCropMode').value,
-                enhance_glove: document.getElementById('cfgGloveEnhance').value === "true"
+                use_roi_crop: cropVal !== "none",
+                roi_crop_mode: cropVal === "none" ? "union" : cropVal,
+                use_clahe: useClaheVal,
+                enhance_glove: useClaheVal
             };
 
             await fetch('/api/config', {
@@ -929,15 +966,33 @@ def api_logs():
     return jsonify(worker.get_recent_logs(limit=50))
 
 
+@app.route("/api/models")
+def api_models():
+    """Mengembalikan daftar file model YOLO yang ada di dalam folder palm_detection/model."""
+    ensure_model_dir()
+    return jsonify({
+        "model_dir": MODEL_DIR,
+        "models": list_available_yolo_models(),
+    })
+
+
 @app.route("/api/config", methods=["GET", "POST"])
 def api_config():
     """Membaca dan memperbarui parameter konfigurasi AppConfig."""
     worker = get_worker()
     if request.method == "GET":
         from dataclasses import asdict
-        return jsonify(asdict(worker.config))
+        cfg_dict = asdict(worker.config)
+        cfg_dict["available_models"] = list_available_yolo_models()
+        return jsonify(cfg_dict)
 
     data = request.get_json(force=True, silent=True) or {}
+    if "enhance_glove" in data and "use_clahe" not in data:
+        data["use_clahe"] = bool(data["enhance_glove"])
+    if data.get("roi_crop_mode") == "none":
+        data["use_roi_crop"] = False
+        data["roi_crop_mode"] = "union"
+
     for key, val in data.items():
         if hasattr(worker.config, key):
             setattr(worker.config, key, val)

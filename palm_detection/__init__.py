@@ -12,3 +12,10 @@ Struktur modul:
     worker     : CameraWorker (QThread), orkestrasi seluruh komponen di atas
     gui        : Widget PyQt5 dan MainWindow
 """
+
+# Pre-load C++ bindings MediaPipe sebelum modul lain (khususnya PyQt5 di Windows)
+# untuk mencegah "ImportError: DLL load failed while importing _framework_bindings"
+try:
+    import mediapipe as _mp  # noqa: F401
+except Exception:
+    pass

@@ -12,6 +12,12 @@ from typing import Dict, List, Optional, Set, Tuple
 import cv2
 import numpy as np
 
+# Pre-load MediaPipe sebelum PyQt5 untuk mencegah konflik DLL _framework_bindings di Windows
+try:
+    import mediapipe as _mp  # noqa: F401
+except Exception:
+    pass
+
 try:
     from PyQt5.QtCore import QThread, pyqtSignal, pyqtSlot
     from PyQt5.QtGui import QImage
@@ -1041,28 +1047,38 @@ class CameraWorker(QThread):
                 )
 
                 for i in range(jumlah_roi):
+                    r_name_i = self.config.get_roi_name(i)
                     if i < len(self.rois):
                         roi_telemetry.append({
                             "index": i,
+                            "name": r_name_i,
                             "state": RoiState.READY.value,
                             "label": "Poligon Siap",
                             "ratio": 0.0,
+                            "diff_ratio": 0.0,
+                            "ambang_rasio": self.config.ambang_rasio,
                             "debounce": "",
                         })
                     elif i == len(self.rois):
                         roi_telemetry.append({
                             "index": i,
+                            "name": r_name_i,
                             "state": RoiState.SETUP.value,
                             "label": f"Klik sudut {len(self.titik_klik)}/4",
                             "ratio": 0.0,
+                            "diff_ratio": 0.0,
+                            "ambang_rasio": self.config.ambang_rasio,
                             "debounce": "",
                         })
                     else:
                         roi_telemetry.append({
                             "index": i,
+                            "name": r_name_i,
                             "state": RoiState.LOCKED.value,
                             "label": "Menunggu dibuat",
                             "ratio": 0.0,
+                            "diff_ratio": 0.0,
+                            "ambang_rasio": self.config.ambang_rasio,
                             "debounce": "",
                         })
 
@@ -1083,6 +1099,7 @@ class CameraWorker(QThread):
                     self.config.hand_backend,
                     self.config.rtm_score_thr,
                     self.config.yolo_model_path,
+                    getattr(self.config, "yolo_target_class", "gloves"),
                 )
                 if (
                     not is_new_frame
@@ -1277,9 +1294,12 @@ class CameraWorker(QThread):
 
                     roi_telemetry.append({
                         "index": idx,
+                        "name": self.config.get_roi_name(idx),
                         "state": roi_state.value,
                         "label": teks,
                         "ratio": self.sequencer.last_ratios[idx],
+                        "diff_ratio": self.sequencer.last_ratios[idx],
+                        "ambang_rasio": self.config.ambang_rasio,
                         "debounce": debounce_info,
                     })
 

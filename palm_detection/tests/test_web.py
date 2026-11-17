@@ -72,10 +72,21 @@ class TestWebHeadlessConsole(unittest.TestCase):
         res_post = self.client.post("/api/config", json={
             "ambang_piksel": 48,
             "debounce_masuk": 9,
+            "enhance_glove": True,
+            "roi_crop_mode": "none",
         })
         self.assertEqual(res_post.status_code, 200)
         self.assertEqual(self.worker.config.ambang_piksel, 48)
         self.assertEqual(self.worker.config.debounce_masuk, 9)
+        self.assertTrue(self.worker.config.use_clahe)
+        self.assertFalse(self.worker.config.use_roi_crop)
+
+        # 3. GET Models list from palm_detection/model
+        res_models = self.client.get("/api/models")
+        self.assertEqual(res_models.status_code, 200)
+        m_data = res_models.get_json()
+        self.assertIn("models", m_data)
+        self.assertIsInstance(m_data["models"], list)
 
     def test_api_click_endpoint(self):
         res = self.client.post("/api/click", json={"x": 120, "y": 240})

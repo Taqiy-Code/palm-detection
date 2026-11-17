@@ -6,7 +6,19 @@ Nilai `StrEnum` identik dengan string lama di config.json sehingga perbandingan
 
 from __future__ import annotations
 
-from enum import Enum, StrEnum, auto
+from enum import Enum, auto
+
+try:
+    from enum import StrEnum
+except ImportError:
+    class StrEnum(str, Enum):
+        """Polyfill StrEnum untuk Python < 3.11 (seperti Python 3.10 di Nvidia Jetson)."""
+
+        def __str__(self) -> str:
+            return str(self.value)
+
+        def __format__(self, format_spec: str) -> str:
+            return str(self.value).__format__(format_spec)
 
 
 class StepStatus(Enum):

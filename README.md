@@ -28,7 +28,7 @@ Aplikasi ini menggunakan antarmuka grafis desktop modern berbasis **PyQt5** yang
 
 ## 🛠️ Instalasi & Persiapan Lingkungan (Virtual Environment)
 
-Proyek ini telah dikonfigurasi dengan virtual environment `.venv` terisolasi berbasis Python 3.12.
+Proyek ini mendukung Python >= 3.10 (termasuk kompatibel dengan Python 3.10 pada Nvidia Jetson / Ubuntu 22.04).
 
 ### 1. Aktivasi Virtual Environment
 Di terminal PowerShell / Command Prompt:

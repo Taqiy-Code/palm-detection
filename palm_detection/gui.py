@@ -1624,6 +1624,10 @@ class MainWindow(QMainWindow):
 
 
 def main() -> None:
+    # Bersihkan konflik path plugin OpenCV jika terdaftar di environment
+    if "QT_QPA_PLATFORM_PLUGIN_PATH" in os.environ and "cv2" in os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"]:
+        del os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"]
+
     app = QApplication(sys.argv)
     window = MainWindow()
     app.aboutToQuit.connect(window.shutdown_all)

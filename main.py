@@ -10,9 +10,36 @@ Seluruh arsitektur telah dipecah secara modular menjadi:
 
 from __future__ import annotations
 
+import os
 import sys
 
+# Mencegah konflik library Qt antara OpenCV dan PyQt5 pada sistem Linux/Jetson.
+# Menghapus path plugin cv2 dan memprioritaskan direktori platform plugins PyQt5.
+if "QT_QPA_PLATFORM_PLUGIN_PATH" in os.environ and "cv2" in os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"]:
+    del os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"]
+
+try:
+    import PyQt5
+    pyqt_base = os.path.dirname(PyQt5.__file__)
+    for cand in (
+        os.path.join(pyqt_base, "Qt5", "plugins", "platforms"),
+        os.path.join(pyqt_base, "Qt", "plugins", "platforms"),
+        os.path.join(pyqt_base, "plugins", "platforms"),
+    ):
+        if os.path.isdir(cand):
+            os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = cand
+            break
+except Exception:
+    pass
+
 from palm_detection.config import AppConfig, CONFIG_FILE
+from palm_detection.gui import (
+    MainWindow,
+    ROICardWidget,
+    SettingsDialog,
+    VideoCanvas,
+    main,
+)
 from palm_detection.detector import (
     HandDetectionPipeline,
     HandDetector,
@@ -22,13 +49,6 @@ from palm_detection.detector import (
     UJUNG_JARI,
     YOLOPoseHandDetector,
     preprocess_glove,
-)
-from palm_detection.gui import (
-    MainWindow,
-    ROICardWidget,
-    SettingsDialog,
-    VideoCanvas,
-    main,
 )
 from palm_detection.renderer import (
     SAMBUNGAN_TANGAN,

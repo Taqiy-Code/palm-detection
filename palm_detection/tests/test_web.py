@@ -37,6 +37,15 @@ class TestWebHeadlessConsole(unittest.TestCase):
         self.assertIn("Palm Detection Web Console", res.get_data(as_text=True))
         self.assertIn("/video_feed", res.get_data(as_text=True))
 
+    def test_video_feed_stream(self):
+        res = self.client.get("/video_feed")
+        self.assertEqual(res.status_code, 200)
+        self.assertIn("multipart/x-mixed-replace", res.headers.get("Content-Type", ""))
+        # Baca satu chunk awal untuk memastikan generator berjalan tanpa error
+        chunk = next(res.response)
+        self.assertIn(b"--frame", chunk)
+        self.assertIn(b"Content-Type: image/jpeg", chunk)
+
     def test_api_telemetry_endpoint(self):
         res = self.client.get("/api/telemetry")
         self.assertEqual(res.status_code, 200)

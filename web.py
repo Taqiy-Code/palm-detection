@@ -22,6 +22,7 @@ import time
 from typing import Optional
 
 import cv2
+import numpy as np
 from flask import Flask, Response, jsonify, render_template_string, request
 
 from palm_detection.config import AppConfig, CONFIG_FILE
@@ -877,14 +878,29 @@ def video_feed():
     worker = get_worker()
 
     def generate_frames():
+        blank_frame: Optional[bytes] = None
         while True:
             jpeg = worker.get_latest_jpeg(quality=75)
             if jpeg is None:
-                # Placeholder frame jika kamera belum siap
-                blank = cv2.imencode(".jpg", 30 * np.ones((360, 640, 3), dtype=np.uint8))[1].tobytes()
+                if blank_frame is None:
+                    # Buat placeholder hitam dengan pesan status jika kamera belum aktif
+                    img = 20 * np.ones((360, 640, 3), dtype=np.uint8)
+                    cv2.putText(
+                        img,
+                        "Menghubungkan ke kamera...",
+                        (140, 185),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.8,
+                        (120, 160, 255),
+                        2,
+                        cv2.LINE_AA,
+                    )
+                    ok, buf = cv2.imencode(".jpg", img)
+                    blank_frame = buf.tobytes() if ok else b""
+
                 yield (
                     b"--frame\r\n"
-                    b"Content-Type: image/jpeg\r\n\r\n" + blank + b"\r\n"
+                    b"Content-Type: image/jpeg\r\n\r\n" + blank_frame + b"\r\n"
                 )
                 time.sleep(0.08)
                 continue

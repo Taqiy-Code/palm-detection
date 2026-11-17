@@ -38,21 +38,44 @@ Di terminal PowerShell / Command Prompt:
 *(Atau di CMD biasa: `.venv\Scripts\activate.bat`)*
 
 ### 2. Menjalankan Aplikasi
-Setelah venv aktif:
+
+#### A. Mode Desktop GUI (PyQt5)
+Jika perangkat terhubung ke monitor / display X11:
 ```bash
 python main.py
 ```
-Atau langsung jalankan skrip peluncur:
+Atau di Windows:
 ```cmd
 run.bat
 ```
+
+#### B. Mode Headless Web Console (Nvidia Jetson / Tanpa Monitor)
+Jika perangkat berjalan tanpa layar monitor (*headless edge server*):
+```bash
+python3 web.py --host 0.0.0.0 --port 5000
+```
+Atau via skrip peluncur:
+```bash
+chmod +x run_web.sh
+./run_web.sh
+```
+Buka browser di laptop atau HP yang terhubung ke jaringan lokal:
+```text
+http://<IP_JETSON>:5000
+```
+Fitur Web Console:
+- Live streaming video MJPEG dengan overlay ROI & deteksi tangan real-time.
+- Kalibrasi & pembuatan poligon ROI langsung dengan mengklik 4 titik pada layar video di browser.
+- Monitoring telemetri: Counter Part Selesai, Progres Langkah Poka-Yoke, Status Banner, dan Log Aktivitas.
+- Modal Pengaturan lengkap untuk pergantian backend AI (RTMlib, MediaPipe, YOLO), threshold piksel, debounce, dan hardware kamera.
 
 ---
 
 ## 📦 Dependensi Utama
 
 - `PyQt5`: Antarmuka GUI desktop
-- `opencv-contrib-python`: Pengolahan citra dan akuisisi kamera
+- `Flask`: Antarmuka Web Dashboard & Streaming video untuk pengoperasian Headless
+- `opencv-contrib-python-headless`: Pengolahan citra dan akuisisi kamera (bebas konflik GUI Qt pada Linux/Jetson)
 - `rtmlib`: Framework pelacakan tangan RTMPose berbasis deep learning
 - `onnxruntime`: Engine inferensi model AI
 - `mediapipe`: Framework pelacakan tangan alternatif dari Google

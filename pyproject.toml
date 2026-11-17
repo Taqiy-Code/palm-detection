@@ -11,4 +11,5 @@ dependencies = [
     "rtmlib>=0.0.16",
     "onnxruntime>=1.18.0",
     "mediapipe>=0.10.14,<=0.10.21",
+    "Flask>=2.2.0,<4.0.0",
 ]

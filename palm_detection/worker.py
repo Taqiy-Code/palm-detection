@@ -11,8 +11,66 @@ from typing import Dict, List, Optional, Set, Tuple
 
 import cv2
 import numpy as np
-from PyQt5.QtCore import QThread, pyqtSignal, pyqtSlot
-from PyQt5.QtGui import QImage
+
+try:
+    from PyQt5.QtCore import QThread, pyqtSignal, pyqtSlot
+    from PyQt5.QtGui import QImage
+except ImportError:
+    class QThread(threading.Thread):
+        """Fallback QThread menggunakan threading.Thread standar saat PyQt5 tidak terpasang."""
+
+        def __init__(self, parent=None):
+            super().__init__(daemon=True)
+            self._is_running = False
+
+        def isRunning(self) -> bool:
+            return self.is_alive()
+
+        def wait(self, timeout: Optional[float] = None) -> None:
+            if timeout is not None:
+                self.join(timeout / 1000.0)
+            else:
+                self.join()
+
+        def start(self) -> None:
+            self._is_running = True
+            super().start()
+
+    class _Signal:
+        def __init__(self, *types):
+            self._callbacks = []
+
+        def connect(self, slot) -> None:
+            if slot not in self._callbacks:
+                self._callbacks.append(slot)
+
+        def disconnect(self, slot) -> None:
+            if slot in self._callbacks:
+                self._callbacks.remove(slot)
+
+        def emit(self, *args):
+            for cb in list(self._callbacks):
+                try:
+                    cb(*args)
+                except Exception:
+                    pass
+
+    def pyqtSignal(*types):
+        return _Signal(*types)
+
+    def pyqtSlot(*types):
+        def decorator(fn):
+            return fn
+        return decorator
+
+    class QImage:
+        Format_RGB888 = 0
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def copy(self):
+            return self
 
 from palm_detection.config import AppConfig, CONFIG_FILE
 from palm_detection.detector import HandDetectionPipeline
@@ -140,7 +198,40 @@ class CameraWorker(QThread):
         # Antrian perintah thread-safe dari GUI
         self._cmd_queue: queue.Queue = queue.Queue()
 
+        # State Web Stream & Headless Telemetry
+        self._web_lock = threading.Lock()
+        self._latest_bgr_frame: Optional[np.ndarray] = None
+        self._latest_telemetry: dict = {}
+        self._logs_lock = threading.Lock()
+        self._recent_logs: List[dict] = []
+        self.log_event.connect(self._record_internal_log)
+
         self._init_post_hand_frames()
+
+    def _record_internal_log(self, level: str, message: str) -> None:
+        ts = time.strftime("%H:%M:%S")
+        with self._logs_lock:
+            self._recent_logs.append({"time": ts, "level": level, "message": message})
+            if len(self._recent_logs) > 200:
+                self._recent_logs.pop(0)
+
+    def get_latest_jpeg(self, quality: int = 80) -> Optional[bytes]:
+        """Mengambil frame teranotasi terbaru dalam format bytes JPEG untuk streaming web."""
+        with self._web_lock:
+            if self._latest_bgr_frame is None:
+                return None
+            ok, buf = cv2.imencode(".jpg", self._latest_bgr_frame, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+            return buf.tobytes() if ok else None
+
+    def get_latest_telemetry(self) -> dict:
+        """Mengambil data telemetri real-time terbaru secara thread-safe."""
+        with self._web_lock:
+            return dict(self._latest_telemetry)
+
+    def get_recent_logs(self, limit: int = 50) -> List[dict]:
+        """Mengambil riwayat log event terbaru."""
+        with self._logs_lock:
+            return list(self._recent_logs[-limit:])
 
     def _init_post_hand_frames(self) -> None:
         n = max(self.config.jumlah_roi, len(self.rois), 1)
@@ -222,9 +313,11 @@ class CameraWorker(QThread):
         self.post_command("recapture_ref", None)
 
     def trigger_clear_status(self) -> None:
+        self.sequencer.clear_statuses()
         self.post_command("clear_status", None)
 
     def trigger_reset_parts(self) -> None:
+        self.sequencer.reset_parts()
         self.post_command("reset_parts", None)
 
     def update_roi_vertex(self, roi_idx: int, v_idx: int, nx: int, ny: int) -> None:
@@ -1270,12 +1363,15 @@ class CameraWorker(QThread):
                 self.video_paused = True
 
             # Konversi BGR -> QImage dan pancarkan sinyal
-            rgb_out = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            h, w, ch = rgb_out.shape
-            qimg = QImage(rgb_out.data, w, h, ch * w, QImage.Format_RGB888).copy()
+            try:
+                rgb_out = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                h, w, ch = rgb_out.shape
+                qimg = QImage(rgb_out.data, w, h, ch * w, QImage.Format_RGB888).copy()
+                self.frame_ready.emit(qimg, w, h)
+            except Exception:
+                pass
 
-            self.frame_ready.emit(qimg, w, h)
-            self.telemetry_updated.emit({
+            telemetry_data = {
                 "banner_text": banner_text,
                 "banner_state": banner_state.value if isinstance(banner_state, BannerState) else banner_state,
                 "rois": roi_telemetry,
@@ -1297,7 +1393,13 @@ class CameraWorker(QThread):
                 "is_recording": self.is_recording,
                 "recording_path": self.recording_path or "",
                 "recorded_frames_count": self.recorded_frames_count,
-            })
+            }
+
+            with self._web_lock:
+                self._latest_bgr_frame = frame
+                self._latest_telemetry = telemetry_data
+
+            self.telemetry_updated.emit(telemetry_data)
 
             # Pacing loop pada mode video
             if self.is_video_mode:

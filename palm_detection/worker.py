@@ -1105,7 +1105,8 @@ class CameraWorker(QThread):
                             LogLevel.WARN.value,
                             f"Gagal menjalankan backend '{self.config.hand_backend}': {exc}",
                         )
-                        tangan, crop_boxes = [], [(0, 0, w, h)]
+                        cur_h, cur_w = frame.shape[:2]
+                        tangan, crop_boxes = [], [(0, 0, cur_w, cur_h)]
                     if self.is_video_mode:
                         self._cached_detect_key = detect_key
                         self._cached_detect_res = (tangan, crop_boxes, frame.copy())

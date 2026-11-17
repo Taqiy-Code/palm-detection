@@ -326,13 +326,14 @@ class SettingsDialog(QDialog):
         self.combo_backend = QComboBox()
         self.combo_backend.addItem("RTMlib (RTMPose)", "rtmlib")
         self.combo_backend.addItem("MediaPipe Hands", "mediapipe")
-        self.combo_backend.addItem("YOLO26n-Pose (Ultralytics)", "yolo26n")
-        backend_idx_map = {"rtmlib": 0, "mediapipe": 1, "yolo26n": 2}
+        self.combo_backend.addItem("YOLO Pose (Keypoints)", "yolo26n")
+        self.combo_backend.addItem("YOLO Object Detection (Sarung Tangan)", "yolo_detect")
+        backend_idx_map = {"rtmlib": 0, "mediapipe": 1, "yolo26n": 2, "yolo_detect": 3}
         self.combo_backend.setCurrentIndex(backend_idx_map.get(self.config.hand_backend, 0))
         self.combo_backend.currentIndexChanged.connect(self.on_backend_changed)
         engine_layout.addWidget(self.combo_backend, 0, 1)
 
-        engine_layout.addWidget(QLabel("Model YOLO Pose:"), 1, 0)
+        engine_layout.addWidget(QLabel("Model YOLO (.pt/.onnx):"), 1, 0)
         yolo_row = QHBoxLayout()
         yolo_row.setContentsMargins(0, 0, 0, 0)
         yolo_row.setSpacing(6)
@@ -372,7 +373,7 @@ class SettingsDialog(QDialog):
         self.combo_tracking_mode.currentIndexChanged.connect(self.on_tracking_mode_changed)
         engine_layout.addWidget(self.combo_tracking_mode, 3, 1)
 
-        is_yolo = self.config.hand_backend == "yolo26n"
+        is_yolo = self.config.hand_backend in ("yolo26n", "yolo_detect")
         self.edit_yolo_model.setEnabled(is_yolo)
         self.btn_browse_yolo.setEnabled(is_yolo)
 
@@ -640,14 +641,14 @@ class SettingsDialog(QDialog):
 
     def on_backend_changed(self) -> None:
         self.config.hand_backend = self.combo_backend.currentData()
-        is_yolo = self.config.hand_backend == "yolo26n"
+        is_yolo = self.config.hand_backend in ("yolo26n", "yolo_detect")
         self.edit_yolo_model.setEnabled(is_yolo)
         self.btn_browse_yolo.setEnabled(is_yolo)
 
     def on_browse_yolo_model(self) -> None:
         filepath, _ = QFileDialog.getOpenFileName(
             self,
-            "Pilih Model YOLO Pose",
+            "Pilih Model YOLO (.pt / .onnx)",
             "",
             "YOLO Models (*.pt *.onnx *.engine);;All Files (*)",
         )
@@ -722,7 +723,7 @@ class SettingsDialog(QDialog):
         self.chk_show_crop_box.setChecked(self.config.show_crop_box)
         self.on_use_roi_crop_toggled(self.config.use_roi_crop)
 
-        backend_idx_map = {"rtmlib": 0, "mediapipe": 1, "yolo26n": 2}
+        backend_idx_map = {"rtmlib": 0, "mediapipe": 1, "yolo26n": 2, "yolo_detect": 3}
         self.combo_backend.setCurrentIndex(backend_idx_map.get(self.config.hand_backend, 0))
         self.edit_yolo_model.setText(self.config.yolo_model_path)
         self.spin_rtm_score.setValue(self.config.rtm_score_thr)
@@ -1431,9 +1432,12 @@ class MainWindow(QMainWindow):
 
         if self.config.hand_backend == "rtmlib":
             engine_str = "RTMlib (RTMPose)"
+        elif self.config.hand_backend == "yolo_detect":
+            model_name = os.path.basename(self.config.yolo_model_path or "yolo.pt")
+            engine_str = f"YOLO Deteksi Sarung Tangan ({model_name})"
         elif self.config.hand_backend == "yolo26n":
             model_name = os.path.basename(self.config.yolo_model_path or "yolo26n-pose.pt")
-            engine_str = f"YOLO26n-Pose ({model_name})"
+            engine_str = f"YOLO Pose ({model_name})"
         else:
             engine_str = "Google MediaPipe"
         rec_str = f" | [REC: {rec_count} frame]" if is_rec else ""

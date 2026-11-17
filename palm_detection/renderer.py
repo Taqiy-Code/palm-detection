@@ -143,6 +143,40 @@ class OverlayRenderer:
         mode_str = tracking_mode.value if isinstance(tracking_mode, TrackingMode) else tracking_mode
 
         for h in hands:
+            # Jika objek dideteksi sebagai bounding box (YOLO Object Detection - Sarung Tangan)
+            if "bbox" in h:
+                x1, y1, x2, y2 = h["bbox"]
+                conf = float(h.get("confidence", 0.0))
+                label = str(h.get("label", "Sarung Tangan"))
+
+                # 1. Gambar kotak & isi transparan
+                if "hull" in h and len(h["hull"]) >= 3:
+                    cv2.polylines(frame, [h["hull"]], True, (0, 255, 170), 2, cv2.LINE_AA)
+                    self.isi_transparan(frame, h["hull"], (0, 255, 170), alpha=0.15)
+                else:
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 170), 2, cv2.LINE_AA)
+
+                # 2. Titik pusat telapak / sarung tangan
+                pc = h["palm_center"]
+                cv2.circle(frame, pc, 6, (0, 255, 255), -1)
+                cv2.circle(frame, pc, 8, (0, 0, 0), 2)
+
+                # 3. Label tag
+                tag_text = f"{label} {int(conf * 100)}%"
+                (tw, th), _ = cv2.getTextSize(tag_text, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+                cv2.rectangle(frame, (x1, max(0, y1 - th - 8)), (x1 + tw + 6, max(th + 8, y1)), (0, 255, 170), -1)
+                cv2.putText(
+                    frame,
+                    tag_text,
+                    (x1 + 3, max(th + 2, y1 - 4)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.45,
+                    (0, 0, 0),
+                    1,
+                    cv2.LINE_AA,
+                )
+                continue
+
             if mode_str == TrackingMode.FULL_HAND:
                 # 1. Selubung convex hull
                 if "hull" in h and len(h["hull"]) >= 3:

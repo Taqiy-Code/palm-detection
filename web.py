@@ -525,7 +525,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     <select id="cfgBackend">
                         <option value="rtmlib">RTMlib (RTMPose Hand)</option>
                         <option value="mediapipe">Google MediaPipe Hands</option>
-                        <option value="yolo26n">YOLO26n-Pose (Ultralytics)</option>
+                        <option value="yolo26n">YOLO Pose (Keypoints)</option>
+                        <option value="yolo_detect">YOLO Object Detection (Deteksi Sarung Tangan)</option>
                     </select>
                 </div>
                 <div class="form-group" id="groupYoloModel">

@@ -324,6 +324,62 @@ class TestDetectorAndRenderer(unittest.TestCase):
         self.assertEqual(detected[0]["palm_center"], (250, 200))
         pipeline.close()
 
+    def test_yolo_object_detection_glove_boxes_and_pipeline(self) -> None:
+        """Menguji pemrosesan bounding box deteksi sarung tangan dari model YOLO Object Detection."""
+        # 1. Mock kelas Boxes dari Ultralytics YOLO
+        class MockBoxes:
+            def __init__(self, xyxy, conf, cls):
+                self.xyxy = np.array(xyxy, dtype=np.float32)
+                self.conf = np.array(conf, dtype=np.float32)
+                self.cls = np.array(cls, dtype=np.int32)
+
+        # 3 kotak: 1 valid glove, 1 confidence rendah, 1 koordinat tidak valid
+        mock_boxes = MockBoxes(
+            xyxy=[
+                [50.0, 60.0, 150.0, 160.0],
+                [200.0, 200.0, 250.0, 250.0],
+                [100.0, 100.0, 50.0, 50.0],
+            ],
+            conf=[0.88, 0.20, 0.95],
+            cls=[0, 0, 0],
+        )
+
+        names_dict = {0: "Sarung Tangan"}
+        hands = YOLOPoseHandDetector.parse_boxes(mock_boxes, names_dict=names_dict, score_thr=0.35)
+        self.assertEqual(len(hands), 1)
+        glove = hands[0]
+        self.assertEqual(glove["palm_center"], (100, 110))
+        self.assertEqual(glove["bbox"], (50, 60, 150, 160))
+        self.assertAlmostEqual(glove["confidence"], 0.88, places=2)
+        self.assertEqual(glove["label"], "Sarung Tangan")
+        self.assertEqual(len(glove["fingertips"]), 5)
+        self.assertEqual(len(glove["keypoints_21"]), 21)
+        self.assertIsNotNone(glove["hull"])
+        self.assertEqual(len(glove["hull"]), 4)
+
+        # 2. Uji pipeline integrasi dengan HandBackend.YOLO_DETECT
+        pipeline = HandDetectionPipeline()
+        cfg = AppConfig(
+            use_roi_crop=False,
+            use_clahe=False,
+            hand_backend=HandBackend.YOLO_DETECT,
+            yolo_model_path="custom_glove_yolo.pt",
+        )
+        dummy_yolo = DummyHandDetector(target_center=(100, 110))
+        frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        roi = np.array([[30, 30], [200, 30], [200, 200], [30, 200]], dtype=np.int32)
+        with patch.object(pipeline, "get_yolo", return_value=dummy_yolo):
+            detected, _ = pipeline.detect_hands(frame, [roi], cfg)
+        self.assertEqual(len(detected), 1)
+        self.assertEqual(detected[0]["palm_center"], (100, 110))
+        pipeline.close()
+
+        # 3. Uji render overlay untuk bounding box sarung tangan
+        renderer = OverlayRenderer()
+        annotated = frame.copy()
+        renderer.draw_hands(annotated, hands, TrackingMode.FULL_HAND)
+        self.assertTrue(np.any(annotated[60:160, 50:150] > 0))
+
     def test_overlay_renderer_all_modes(self) -> None:
         renderer = OverlayRenderer()
         frame = np.zeros((480, 640, 3), dtype=np.uint8)

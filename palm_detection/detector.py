@@ -411,6 +411,87 @@ class YOLOPoseHandDetector(HandDetector):
 
         return results
 
+    @classmethod
+    def parse_boxes(
+        cls,
+        boxes_obj,
+        names_dict: Optional[dict] = None,
+        score_thr: float = 0.35,
+    ) -> List[dict]:
+        """Mengonversi bounding box YOLO Object Detection (mis. model deteksi sarung tangan) ke representasi tangan."""
+        results: List[dict] = []
+        try:
+            xyxy_t = getattr(boxes_obj, "xyxy", None)
+            conf_t = getattr(boxes_obj, "conf", None)
+            cls_t = getattr(boxes_obj, "cls", None)
+            if xyxy_t is None:
+                return []
+
+            xyxy_np = xyxy_t.cpu().numpy() if hasattr(xyxy_t, "cpu") else np.asarray(xyxy_t)
+            conf_np = (
+                (conf_t.cpu().numpy() if hasattr(conf_t, "cpu") else np.asarray(conf_t))
+                if conf_t is not None
+                else np.ones(len(xyxy_np), dtype=np.float32)
+            )
+            cls_np = (
+                (cls_t.cpu().numpy() if hasattr(cls_t, "cpu") else np.asarray(cls_t))
+                if cls_t is not None
+                else np.zeros(len(xyxy_np), dtype=np.int32)
+            )
+        except Exception:
+            return []
+
+        thr = float(score_thr)
+        for i, box in enumerate(xyxy_np):
+            score = float(conf_np[i]) if i < len(conf_np) else 1.0
+            if score < thr:
+                continue
+
+            x1, y1, x2, y2 = [int(round(float(v))) for v in box[:4]]
+            if x2 <= x1 or y2 <= y1:
+                continue
+
+            cx = int((x1 + x2) / 2)
+            cy = int((y1 + y2) / 2)
+            bw = max(1, x2 - x1)
+            bh = max(1, y2 - y1)
+
+            # Poligon sudut sarung tangan (format kontur cv2 (N, 1, 2))
+            hull = cv2.convexHull(np.array([[x1, y1], [x2, y1], [x2, y2], [x1, y2]], dtype=np.int32))
+
+            # Titik-titik persebaran representatif sarung tangan
+            all_pts = [
+                (x1, y1), (x2, y1), (x2, y2), (x1, y2),
+                (cx, cy),
+                (x1 + bw // 4, cy), (x2 - bw // 4, cy),
+                (cx, y1 + bh // 4), (cx, y2 - bh // 4),
+            ]
+
+            # 5 Titik 'fingertips' di tepi depan/atas kotak sarung tangan
+            fingertips = [(x1 + int(bw * f), y1) for f in (0.1, 0.3, 0.5, 0.7, 0.9)]
+
+            # Titik punggung/pergelangan di bagian tengah dan bawah kotak
+            dorsum = [(cx, cy), (x1, y2), (x2, y2), (cx, y2)]
+
+            c_id = int(cls_np[i]) if i < len(cls_np) else 0
+            label = "Sarung Tangan"
+            if isinstance(names_dict, dict) and c_id in names_dict:
+                label = str(names_dict[c_id])
+
+            results.append({
+                "fingertips": fingertips,
+                "palm_center": (cx, cy),
+                "dorsum_points": dorsum,
+                "all_points": all_pts,
+                "keypoints_21": all_pts + [(cx, cy)] * (21 - len(all_pts)),
+                "hull": hull,
+                "bbox": (x1, y1, x2, y2),
+                "confidence": score,
+                "label": label,
+            })
+
+        return results
+
     def detect(self, crop_bgr: np.ndarray) -> List[dict]:
         if self.model is None:
             return []
@@ -420,20 +501,29 @@ class YOLOPoseHandDetector(HandDetector):
 
         all_detected: List[dict] = []
         for res in preds:
+            # 1. Coba deteksi Keypoints (YOLO Pose)
             kpts_obj = getattr(res, "keypoints", None)
-            if kpts_obj is None:
-                continue
-            xy = getattr(kpts_obj, "xy", None)
-            if xy is None:
-                continue
-            xy_np = xy.cpu().numpy() if hasattr(xy, "cpu") else np.asarray(xy)
-            conf = getattr(kpts_obj, "conf", None)
-            conf_np = (
-                (conf.cpu().numpy() if hasattr(conf, "cpu") else np.asarray(conf))
-                if conf is not None
-                else None
-            )
-            all_detected.extend(self.parse_keypoints_array(xy_np, conf_np, self.score_thr))
+            if kpts_obj is not None:
+                xy = getattr(kpts_obj, "xy", None)
+                if xy is not None:
+                    xy_np = xy.cpu().numpy() if hasattr(xy, "cpu") else np.asarray(xy)
+                    if len(xy_np) > 0 and xy_np.shape[-1] >= 2:
+                        conf = getattr(kpts_obj, "conf", None)
+                        conf_np = (
+                            (conf.cpu().numpy() if hasattr(conf, "cpu") else np.asarray(conf))
+                            if conf is not None
+                            else None
+                        )
+                        pose_results = self.parse_keypoints_array(xy_np, conf_np, self.score_thr)
+                        if pose_results:
+                            all_detected.extend(pose_results)
+                            continue
+
+            # 2. Coba deteksi Bounding Boxes (YOLO Object Detection - Sarung Tangan)
+            boxes_obj = getattr(res, "boxes", None)
+            if boxes_obj is not None and len(boxes_obj) > 0:
+                box_results = self.parse_boxes(boxes_obj, getattr(res, "names", None), self.score_thr)
+                all_detected.extend(box_results)
 
         return all_detected
 
@@ -597,7 +687,7 @@ class HandDetectionPipeline:
             if backend_str == "rtmlib":
                 det = self.get_rtm(float(config.rtm_score_thr))
                 detected = det.detect(crop_feed_bgr)
-            elif backend_str == "yolo26n":
+            elif backend_str in ("yolo26n", "yolo_detect", "yolo"):
                 yolo_path = str(getattr(config, "yolo_model_path", "yolo26n-pose.pt"))
                 det = self.get_yolo(yolo_path, float(config.rtm_score_thr))
                 detected = det.detect(crop_feed_bgr)
@@ -625,6 +715,14 @@ class HandDetectionPipeline:
                         else h["hull"]
                     ),
                 }
+                if "bbox" in h:
+                    bx1, by1, bx2, by2 = h["bbox"]
+                    global_hand["bbox"] = (x1 + bx1, y1 + by1, x1 + bx2, y1 + by2)
+                if "confidence" in h:
+                    global_hand["confidence"] = h["confidence"]
+                if "label" in h:
+                    global_hand["label"] = h["label"]
+
                 if not self.is_duplicate_hand(global_hand, all_hands):
                     all_hands.append(global_hand)
 
@@ -633,3 +731,19 @@ class HandDetectionPipeline:
             frame[py1:py2, px1:px2] = patch
 
         return all_hands, regions
+
+
+# Kompatibilitas nama alias
+YOLOHandDetector = YOLOPoseHandDetector
+
+__all__ = [
+    "UJUNG_JARI",
+    "SENDI_PUNGGUNG",
+    "preprocess_glove",
+    "HandDetector",
+    "RTMHandDetector",
+    "MediaPipeHandDetector",
+    "YOLOPoseHandDetector",
+    "YOLOHandDetector",
+    "HandDetectionPipeline",
+]

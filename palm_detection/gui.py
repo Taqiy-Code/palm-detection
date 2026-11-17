@@ -1,4 +1,4 @@
-"""Komponen antarmuka grafis (PyQt6) untuk Palm Detection."""
+"""Komponen antarmuka grafis (PyQt5) untuk Palm Detection."""
 
 from __future__ import annotations
 
@@ -7,9 +7,10 @@ import os
 import sys
 from typing import List, Optional, Tuple
 
-from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot
-from PyQt6.QtGui import QAction, QColor, QFont, QImage, QKeySequence, QMouseEvent, QPixmap
-from PyQt6.QtWidgets import (
+from PyQt5.QtCore import Qt, pyqtSignal, pyqtSlot
+from PyQt5.QtGui import QColor, QFont, QImage, QKeySequence, QMouseEvent, QPixmap
+from PyQt5.QtWidgets import (
+    QAction,
     QApplication,
     QCheckBox,
     QComboBox,
@@ -53,7 +54,7 @@ class VideoCanvas(QLabel):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setAlignment(Qt.AlignCenter)
         self.setMinimumSize(640, 360)
         self.setMouseTracking(True)
         self.setStyleSheet(
@@ -74,8 +75,8 @@ class VideoCanvas(QLabel):
         pixmap = QPixmap.fromImage(qimg)
         scaled = pixmap.scaled(
             self.size(),
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation,
         )
         self.setPixmap(scaled)
 
@@ -107,26 +108,28 @@ class VideoCanvas(QLabel):
         return None
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
-        if event.button() == Qt.MouseButton.LeftButton:
-            mapped = self._map_to_frame(int(event.position().x()), int(event.position().y()))
+        if event.button() == Qt.LeftButton:
+            pos = event.pos()
+            mapped = self._map_to_frame(int(pos.x()), int(pos.y()))
             if mapped:
                 fx, fy = mapped
                 target = self._find_vertex_near(fx, fy)
                 if target is not None:
                     self._drag_target = target
-                    self.setCursor(Qt.CursorShape.ClosedHandCursor)
+                    self.setCursor(Qt.ClosedHandCursor)
                     return
                 self.left_clicked.emit(fx, fy)
-        elif event.button() == Qt.MouseButton.RightButton:
+        elif event.button() == Qt.RightButton:
             if self._drag_target is not None:
                 self._drag_target = None
-                self.setCursor(Qt.CursorShape.ArrowCursor)
+                self.setCursor(Qt.ArrowCursor)
             else:
                 self.right_clicked.emit()
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
-        mapped = self._map_to_frame(int(event.position().x()), int(event.position().y()))
+        pos = event.pos()
+        mapped = self._map_to_frame(int(pos.x()), int(pos.y()))
         if mapped:
             fx, fy = mapped
             if self._drag_target is not None:
@@ -137,16 +140,16 @@ class VideoCanvas(QLabel):
             else:
                 near = self._find_vertex_near(fx, fy)
                 if near is not None:
-                    self.setCursor(Qt.CursorShape.PointingHandCursor)
+                    self.setCursor(Qt.PointingHandCursor)
                 else:
-                    self.setCursor(Qt.CursorShape.ArrowCursor)
+                    self.setCursor(Qt.ArrowCursor)
             self.mouse_moved.emit(fx, fy)
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
-        if event.button() == Qt.MouseButton.LeftButton and self._drag_target is not None:
+        if event.button() == Qt.LeftButton and self._drag_target is not None:
             self._drag_target = None
-            self.setCursor(Qt.CursorShape.ArrowCursor)
+            self.setCursor(Qt.ArrowCursor)
             self.vertex_drag_finished.emit()
         super().mouseReleaseEvent(event)
 
@@ -161,7 +164,7 @@ class ROICardWidget(QFrame):
         super().__init__(parent)
         self.idx = idx
         self.config = config
-        self.setFrameShape(QFrame.Shape.StyledPanel)
+        self.setFrameShape(QFrame.StyledPanel)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 8, 10, 8)
@@ -187,7 +190,7 @@ class ROICardWidget(QFrame):
         self.btn_redo.clicked.connect(lambda: self.redo_requested.emit(self.idx))
 
         self.badge_lbl = QLabel("SETUP")
-        self.badge_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.badge_lbl.setAlignment(Qt.AlignCenter)
         self.badge_lbl.setFixedHeight(22)
         self.badge_lbl.setMinimumWidth(105)
 
@@ -256,7 +259,11 @@ class SettingsDialog(QDialog):
         self.worker = worker
         self.setWindowTitle("Pengaturan Sistem")
 
-        screen = self.screen() or (parent.screen() if parent else None) or QApplication.primaryScreen()
+        screen = (
+            getattr(self, "screen", lambda: None)()
+            or (getattr(parent, "screen", lambda: None)() if parent else None)
+            or QApplication.primaryScreen()
+        )
         if screen:
             avail_geo = screen.availableGeometry()
             target_h = int(avail_geo.height() * 0.80)
@@ -434,7 +441,7 @@ class SettingsDialog(QDialog):
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setFrameShape(QFrame.NoFrame)
         scroll.setWidget(tab)
         return scroll
 
@@ -517,7 +524,7 @@ class SettingsDialog(QDialog):
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setFrameShape(QFrame.NoFrame)
         scroll.setWidget(tab)
         return scroll
 
@@ -609,13 +616,13 @@ class SettingsDialog(QDialog):
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setFrameShape(QFrame.NoFrame)
         scroll.setWidget(tab)
         return scroll
 
     @staticmethod
     def _make_slider_spin(min_val: int, max_val: int, init_val: int, callback, step: int = 1):
-        slider = QSlider(Qt.Orientation.Horizontal)
+        slider = QSlider(Qt.Horizontal)
         slider.setRange(min_val, max_val)
         slider.setSingleStep(step)
         slider.setValue(init_val)
@@ -927,7 +934,7 @@ class MainWindow(QMainWindow):
         header_bar.setSpacing(8)
 
         title_lbl = QLabel("Palm Detection")
-        title_lbl.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
+        title_lbl.setFont(QFont("Segoe UI", 12, QFont.Bold))
         title_lbl.setStyleSheet("color: #58a6ff; letter-spacing: 1px;")
 
         header_bar.addWidget(title_lbl)
@@ -978,9 +985,9 @@ class MainWindow(QMainWindow):
         left_layout.setSpacing(8)
 
         self.banner_lbl = QLabel("Memuat kamera dan menyiapkan sistem...")
-        self.banner_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.banner_lbl.setAlignment(Qt.AlignCenter)
         self.banner_lbl.setFixedHeight(44)
-        self.banner_lbl.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
+        self.banner_lbl.setFont(QFont("Segoe UI", 12, QFont.Bold))
         self._set_banner_style(BannerState.SETUP)
 
         self.canvas = VideoCanvas()
@@ -1013,12 +1020,12 @@ class MainWindow(QMainWindow):
         cp_layout.setContentsMargins(8, 6, 8, 6)
         cp_layout.setSpacing(2)
         self.part_count_lbl = QLabel("0")
-        self.part_count_lbl.setFont(QFont("Segoe UI", 26, QFont.Weight.Bold))
+        self.part_count_lbl.setFont(QFont("Segoe UI", 26, QFont.Bold))
         self.part_count_lbl.setStyleSheet("color: #3fb950;")
-        self.part_count_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.part_count_lbl.setAlignment(Qt.AlignCenter)
         lbl_p_desc = QLabel("Part Selesai")
         lbl_p_desc.setStyleSheet("color: #8b949e; font-size: 11px;")
-        lbl_p_desc.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl_p_desc.setAlignment(Qt.AlignCenter)
         cp_layout.addWidget(self.part_count_lbl)
         cp_layout.addWidget(lbl_p_desc)
 
@@ -1028,12 +1035,12 @@ class MainWindow(QMainWindow):
         cs_layout.setContentsMargins(8, 6, 8, 6)
         cs_layout.setSpacing(2)
         self.step_count_lbl = QLabel("0 / 3")
-        self.step_count_lbl.setFont(QFont("Segoe UI", 20, QFont.Weight.Bold))
+        self.step_count_lbl.setFont(QFont("Segoe UI", 20, QFont.Bold))
         self.step_count_lbl.setStyleSheet("color: #58a6ff;")
-        self.step_count_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.step_count_lbl.setAlignment(Qt.AlignCenter)
         lbl_s_desc = QLabel("Progres Langkah")
         lbl_s_desc.setStyleSheet("color: #8b949e; font-size: 11px;")
-        lbl_s_desc.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl_s_desc.setAlignment(Qt.AlignCenter)
         cs_layout.addWidget(self.step_count_lbl)
         cs_layout.addWidget(lbl_s_desc)
 
@@ -1064,7 +1071,7 @@ class MainWindow(QMainWindow):
         roi_group_layout.setContentsMargins(8, 8, 8, 8)
         roi_scroll = QScrollArea()
         roi_scroll.setWidgetResizable(True)
-        roi_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        roi_scroll.setFrameShape(QFrame.NoFrame)
         roi_scroll.setMaximumHeight(220)
 
         self.roi_cards_container = QWidget()
@@ -1139,7 +1146,7 @@ class MainWindow(QMainWindow):
         self.btn_next_frame.clicked.connect(lambda: self.worker.step_video_frame(1))
         self.btn_next_frame.setEnabled(False)
 
-        self.slider_frame = QSlider(Qt.Orientation.Horizontal)
+        self.slider_frame = QSlider(Qt.Horizontal)
         self.slider_frame.setRange(0, 0)
         self.slider_frame.setEnabled(False)
         self.slider_frame.sliderPressed.connect(self._on_slider_pressed)
@@ -1291,7 +1298,7 @@ class MainWindow(QMainWindow):
 
     def open_settings_dialog(self) -> None:
         dlg = SettingsDialog(self.config, self.worker, self)
-        dlg.exec()
+        dlg.exec_()
 
     @pyqtSlot(str, str)
     def add_log_entry(self, level: str, message: str) -> None:
@@ -1306,7 +1313,7 @@ class MainWindow(QMainWindow):
         }
         item.setForeground(QColor(colors.get(level, "#c9d1d9")))
         if level in (LogLevel.PART.value, LogLevel.SUCCESS.value):
-            item.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+            item.setFont(QFont("Segoe UI", 9, QFont.Bold))
 
         self.log_list.addItem(item)
         self.log_list.scrollToBottom()
@@ -1523,20 +1530,20 @@ class MainWindow(QMainWindow):
 
         msg_box = QMessageBox(self)
         msg_box.setWindowTitle("Jadikan Frame Ini Referensi")
-        msg_box.setIcon(QMessageBox.Icon.Question)
+        msg_box.setIcon(QMessageBox.Question)
         curr_roi_count = len(self.config.saved_rois)
         msg_box.setText(
             "Frame saat ini akan dikunci sebagai referensi background bersih.\n\n"
             f"Pilih pengaturan ROI yang ingin digunakan (ROI aktif saat ini: {curr_roi_count}):"
         )
 
-        btn_keep = msg_box.addButton("Gunakan ROI Saat Ini", QMessageBox.ButtonRole.AcceptRole)
-        btn_add = msg_box.addButton("Tambah ROI Baru", QMessageBox.ButtonRole.ActionRole)
-        btn_reset = msg_box.addButton("Buat Ulang Semua ROI", QMessageBox.ButtonRole.ResetRole)
-        btn_cancel = msg_box.addButton("Batal", QMessageBox.ButtonRole.RejectRole)
+        btn_keep = msg_box.addButton("Gunakan ROI Saat Ini", QMessageBox.AcceptRole)
+        btn_add = msg_box.addButton("Tambah ROI Baru", QMessageBox.ActionRole)
+        btn_reset = msg_box.addButton("Buat Ulang Semua ROI", QMessageBox.ResetRole)
+        btn_cancel = msg_box.addButton("Batal", QMessageBox.RejectRole)
         msg_box.setDefaultButton(btn_keep)
 
-        msg_box.exec()
+        msg_box.exec_()
         clicked = msg_box.clickedButton()
         if clicked == btn_cancel or clicked is None:
             return
@@ -1578,10 +1585,10 @@ class MainWindow(QMainWindow):
             self,
             "Konfirmasi Buat Ulang ROI",
             "Apakah Anda yakin ingin menghapus semua ROI hasil kalibrasi dan membuat ulang dari awal?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
         )
-        if reply == QMessageBox.StandardButton.Yes:
+        if reply == QMessageBox.Yes:
             self.worker.trigger_reset_roi()
 
     def action_recapture_ref(self) -> None:
@@ -1605,10 +1612,10 @@ class MainWindow(QMainWindow):
             self,
             "Konfirmasi Keluar",
             "Apakah Anda yakin ingin menutup aplikasi?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
         )
-        if reply != QMessageBox.StandardButton.Yes:
+        if reply != QMessageBox.Yes:
             event.ignore()
             return
         self.status_bar.showMessage("Menutup aplikasi dan mematikan seluruh kamera...", 1000)
@@ -1622,7 +1629,7 @@ def main() -> None:
     app.aboutToQuit.connect(window.shutdown_all)
     window.show()
     try:
-        exit_code = app.exec()
+        exit_code = app.exec_()
     finally:
         window.shutdown_all()
     sys.exit(exit_code)

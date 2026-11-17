@@ -2,7 +2,7 @@
 
 Sistem otomasi inspeksi dan panduan perakitan komponen bulb kendaraan berbasis visi komputer (*computer vision*) dan pelacakan tangan cerdas (*hand tracking*).
 
-Aplikasi ini menggunakan antarmuka grafis desktop modern berbasis **PyQt6** yang mengintegrasikan akuisisi kamera real-time, segmentasi area kerja (ROI Polygon), deteksi perubahan piksel (*background subtraction*), serta algoritma AI untuk melacak posisi tangan pekerja (Dual-Backend: RTMlib RTMPose dan Google MediaPipe).
+Aplikasi ini menggunakan antarmuka grafis desktop modern berbasis **PyQt5** yang mengintegrasikan akuisisi kamera real-time, segmentasi area kerja (ROI Polygon), deteksi perubahan piksel (*background subtraction*), serta algoritma AI untuk melacak posisi tangan pekerja (Dual-Backend: RTMlib RTMPose dan Google MediaPipe).
 
 ---
 
@@ -51,7 +51,7 @@ run.bat
 
 ## 📦 Dependensi Utama
 
-- `PyQt6`: Antarmuka GUI desktop
+- `PyQt5`: Antarmuka GUI desktop
 - `opencv-contrib-python`: Pengolahan citra dan akuisisi kamera
 - `rtmlib`: Framework pelacakan tangan RTMPose berbasis deep learning
 - `onnxruntime`: Engine inferensi model AI

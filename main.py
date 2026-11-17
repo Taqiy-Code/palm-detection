@@ -5,7 +5,7 @@ Seluruh arsitektur telah dipecah secara modular menjadi:
     - StepSequencer (palm_detection.sequencer): State machine murni tanpa dependensi OpenCV/Qt
     - OverlayRenderer (palm_detection.renderer): Visualizer grafis OpenCV
     - CameraWorker (palm_detection.worker): Orkestrator thread kamera dan deteksi
-    - GUI (palm_detection.gui): Antarmuka modern PyQt6
+    - GUI (palm_detection.gui): Antarmuka modern PyQt5
 """
 
 from __future__ import annotations

@@ -11,8 +11,8 @@ from typing import Dict, List, Optional, Set, Tuple
 
 import cv2
 import numpy as np
-from PyQt6.QtCore import QThread, pyqtSignal, pyqtSlot
-from PyQt6.QtGui import QImage
+from PyQt5.QtCore import QThread, pyqtSignal, pyqtSlot
+from PyQt5.QtGui import QImage
 
 from palm_detection.config import AppConfig, CONFIG_FILE
 from palm_detection.detector import HandDetectionPipeline
@@ -1272,7 +1272,7 @@ class CameraWorker(QThread):
             # Konversi BGR -> QImage dan pancarkan sinyal
             rgb_out = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             h, w, ch = rgb_out.shape
-            qimg = QImage(rgb_out.data, w, h, ch * w, QImage.Format.Format_RGB888).copy()
+            qimg = QImage(rgb_out.data, w, h, ch * w, QImage.Format_RGB888).copy()
 
             self.frame_ready.emit(qimg, w, h)
             self.telemetry_updated.emit({

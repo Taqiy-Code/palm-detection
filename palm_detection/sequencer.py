@@ -1,4 +1,4 @@
-"""State machine urutan langkah perakitan (murni, tanpa OpenCV / PyQt6).
+"""State machine urutan langkah perakitan (murni, tanpa OpenCV / PyQt5).
 
 Kelas `StepSequencer` mudah diuji secara modular dengan unit-test tanpa membutuhkan
 lingkungan grafis atau perangkat keras kamera.

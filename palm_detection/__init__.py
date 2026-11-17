@@ -10,5 +10,5 @@ Struktur modul:
     renderer   : OverlayRenderer, hanya menggambar overlay
     camera     : CameraSource, pemilik tunggal cv2.VideoCapture di thread grabber sendiri
     worker     : CameraWorker (QThread), orkestrasi seluruh komponen di atas
-    gui        : Widget PyQt6 dan MainWindow
+    gui        : Widget PyQt5 dan MainWindow
 """

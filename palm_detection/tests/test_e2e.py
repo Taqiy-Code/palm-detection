@@ -8,7 +8,7 @@ Mencakup pengujian menyeluruh untuk:
     5. Penggambaran overlay grafis ROI & tangan (OverlayRenderer)
     6. Orkestrasi CameraWorker: input video, penentuan frame oleh pengguna (seek/step/range),
        kunci frame referensi manual, deteksi urutan langkah, dan ekspor output video teranotasi
-    7. Integrasi penuh antarmuka PyQt6 (MainWindow, VideoCanvas, ROICardWidget, SettingsDialog)
+    7. Integrasi penuh antarmuka PyQt5 (MainWindow, VideoCanvas, ROICardWidget, SettingsDialog)
 """
 
 from __future__ import annotations
@@ -24,9 +24,9 @@ from unittest.mock import patch
 
 import cv2
 import numpy as np
-from PyQt6.QtCore import QPointF, Qt
-from PyQt6.QtGui import QMouseEvent
-from PyQt6.QtWidgets import QApplication
+from PyQt5.QtCore import QEvent, QPointF, Qt
+from PyQt5.QtGui import QMouseEvent
+from PyQt5.QtWidgets import QApplication
 
 from palm_detection.config import AppConfig
 from palm_detection.detector import (
@@ -620,11 +620,11 @@ class TestEndToEndVideoWorkerAndGUI(unittest.TestCase):
                 if dummy_qimg is not None:
                     win.canvas.update_frame(dummy_qimg, 640, 480)
                 click_evt = QMouseEvent(
-                    QMouseEvent.Type.MouseButtonPress,
+                    QEvent.MouseButtonPress,
                     QPointF(100.0, 100.0),
-                    Qt.MouseButton.LeftButton,
-                    Qt.MouseButton.LeftButton,
-                    Qt.KeyboardModifier.NoModifier,
+                    Qt.LeftButton,
+                    Qt.LeftButton,
+                    Qt.NoModifier,
                 )
                 win.canvas.mousePressEvent(click_evt)
 

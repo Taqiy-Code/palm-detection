@@ -187,6 +187,7 @@ class CameraWorker(QThread):
         self.referensi: Optional[np.ndarray] = None
         self._prev_gray: Optional[np.ndarray] = None
         self._no_hand_frames: int = 0
+        self._roi_clear_frames: int = 0
         self._stable_ref_buffer: List[np.ndarray] = []
         self._post_hand_frames: List[List[np.ndarray]] = []
         self._morph_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
@@ -386,6 +387,7 @@ class CameraWorker(QThread):
             self._needs_process_current = True
             self.sequencer.clear_statuses()
             self._init_post_hand_frames()
+            self._roi_clear_frames = 0
             if not self._manual_ref_locked and self.referensi is None:
                 self._no_hand_frames = 0
                 self._stable_ref_buffer.clear()
@@ -629,6 +631,7 @@ class CameraWorker(QThread):
         self.referensi = None
         self._manual_ref_locked = False
         self._no_hand_frames = 0
+        self._roi_clear_frames = 0
         self._stable_ref_buffer.clear()
 
     def _do_reset_roi(self) -> None:
@@ -882,6 +885,7 @@ class CameraWorker(QThread):
             elif cmd == "clear_status":
                 self.sequencer.clear_statuses()
                 self._init_post_hand_frames()
+                self._roi_clear_frames = 0
                 self.log_event.emit("INFO", "Status urutan langkah direset manual ke Langkah 1.")
 
             elif cmd == "reset_parts":
@@ -1182,7 +1186,7 @@ class CameraWorker(QThread):
                 waiting_ref = use_pixel_diff and self.referensi is None
 
                 # Pass 1: Hitung kehadiran tangan & gerak untuk setiap ROI
-                roi_hand_flags: List[Tuple[bool, bool]] = []
+                roi_hand_flags: List[Tuple[bool, bool, bool]] = []
                 for idx, poly in enumerate(self.rois):
                     ada_objek_bergerak = (
                         idx < len(motion_ratios) and motion_ratios[idx] >= self.config.motion_fallback_thr
@@ -1225,7 +1229,17 @@ class CameraWorker(QThread):
                         ada_tangan_model = any(j >= 2 for j in jumlah)
 
                     ada_tangan_atau_gerak = ada_tangan_model or ada_objek_bergerak
-                    roi_hand_flags.append((tangan_masuk_roi, ada_tangan_atau_gerak))
+                    roi_hand_flags.append((tangan_masuk_roi, ada_tangan_model, ada_tangan_atau_gerak))
+
+                # Hitung frame berturut-turut saat seluruh area ROI bebas tangan (untuk auto-cycle aman)
+                any_hand_in_any_roi = any(
+                    in_roi or has_hand for in_roi, has_hand, _ in roi_hand_flags
+                )
+                if is_new_frame:
+                    if not any_hand_in_any_roi:
+                        self._roi_clear_frames += 1
+                    else:
+                        self._roi_clear_frames = 0
 
                 # Evaluasi seluruh langkah terkunci (jumping) & langkah DONE (double-pick) terlebih dahulu
                 locked_errors: Dict[int, bool] = {}
@@ -1265,7 +1279,7 @@ class CameraWorker(QThread):
 
                 # Pass 2: Evaluasi langkah aktif (hanya jika tidak ada pelanggaran step) & render overlay
                 for idx, poly in enumerate(self.rois):
-                    tangan_masuk_roi, ada_tangan_atau_gerak = roi_hand_flags[idx]
+                    tangan_masuk_roi, _, ada_tangan_atau_gerak = roi_hand_flags[idx]
                     debounce_info = ""
 
                     # Evaluasi state langkah
@@ -1394,14 +1408,22 @@ class CameraWorker(QThread):
                     banner_state = BannerState.DONE
                     if cooldown_expired:
                         if not use_pixel_diff:
-                            self.sequencer.clear_statuses()
-                            self.log_event.emit(
-                                LogLevel.INFO.value,
-                                f"Mulai siklus Part #{self.sequencer.parts_completed + 1}...",
-                            )
-                            banner_text = f"PART #{self.sequencer.parts_completed} SELESAI (+1). Memulai siklus baru..."
+                            if self._roi_clear_frames >= needed_clean:
+                                self.sequencer.clear_statuses()
+                                self._roi_clear_frames = 0
+                                self.log_event.emit(
+                                    LogLevel.INFO.value,
+                                    f"Mulai siklus Part #{self.sequencer.parts_completed + 1}...",
+                                )
+                                banner_text = f"PART #{self.sequencer.parts_completed} SELESAI (+1). Memulai siklus baru..."
+                            else:
+                                banner_text = (
+                                    f"PART #{self.sequencer.parts_completed} SELESAI. Jauhkan tangan dari ROI untuk siklus baru "
+                                    f"({self._roi_clear_frames}/{needed_clean})..."
+                                )
                         elif self._no_hand_frames >= needed_clean and len(self._stable_ref_buffer) >= needed_clean:
                             self.sequencer.clear_statuses()
+                            self._roi_clear_frames = 0
                             self.referensi = np.mean(self._stable_ref_buffer, axis=0).astype(np.uint8)
                             self.log_event.emit(
                                 LogLevel.INFO.value,

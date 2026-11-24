@@ -960,6 +960,95 @@ class TestEndToEndVideoWorkerAndGUI(unittest.TestCase):
         self.assertEqual(worker.sequencer.parts_completed, 1)
 
 
+    def test_worker_auto_cycle_waits_until_rois_clear_without_pixel_diff(self) -> None:
+        """Memastikan siklus baru (use_pixel_diff=False) menunggu seluruh ROI bebas tangan sebelum reset."""
+        cycle_video_path = os.path.join(self.tmpdir, "cycle_wait_clear.mp4")
+        writer = cv2.VideoWriter(cycle_video_path, cv2.VideoWriter_fourcc(*"mp4v"), 30.0, (640, 480))
+        static_frame = np.full((480, 640, 3), 80, dtype=np.uint8)
+        for _ in range(16):
+            writer.write(static_frame)
+        writer.release()
+
+        cfg = AppConfig(
+            jumlah_roi=2,
+            debounce_masuk=2,
+            debounce_keluar=2,
+            ref_clean_frames=3,
+            use_pixel_diff=False,
+            use_roi_crop=False,
+            use_clahe=False,
+            hand_backend=HandBackend.RTMLIB,
+            hand_tracking_mode=TrackingMode.FULL_HAND,
+        )
+        worker = CameraWorker(cfg)
+
+        orig_handle = worker.sequencer.handle_cycle_completion
+        worker.sequencer.handle_cycle_completion = (  # type: ignore[method-assign]
+            lambda now_ts, cooldown_seconds=0.0: orig_handle(now_ts, cooldown_seconds=0.0)
+        )
+
+        # Jadwal skenario:
+        # Frame 0..1  : Tangan di ROI 1 -> HAND_IN
+        # Frame 2..3  : Kosong -> ROI 1 DONE
+        # Frame 4..5  : Tangan di ROI 2 -> HAND_IN
+        # Frame 6..7  : Kosong -> ROI 2 DONE (Part #1 selesai, cooldown mulai di frame 7)
+        # Frame 8..11 : Tangan berada di ROI 1 saat cooldown sudah habis -> siklus TIDAK boleh reset
+        # Frame 12..15: Semua ROI bebas tangan (3 frame bersih di 12,13,14) -> siklus reset untuk Part #2
+        def fake_detect_hands(frame, rois, config):
+            f_idx = worker.video_current_frame
+            if 0 <= f_idx <= 1:
+                pos = (160, 210)
+            elif 4 <= f_idx <= 5:
+                pos = (440, 210)
+            elif 8 <= f_idx <= 11:
+                pos = (160, 210)
+            else:
+                pos = None
+            if pos is None:
+                return [], [(0, 0, worker.frame_w, worker.frame_h)]
+            return [DummyHandDetector.make_hand_at(pos[0], pos[1], spread=30)], [
+                (0, 0, worker.frame_w, worker.frame_h)
+            ]
+
+        worker.pipeline.detect_hands = fake_detect_hands  # type: ignore[method-assign]
+        worker.open_video_file(cycle_video_path)
+        worker.load_saved_rois(self.rois)
+        worker._process_pending_commands(None)
+
+        telemetry_by_frame = {}
+
+        def _capture(data: dict) -> None:
+            telemetry_by_frame[int(data.get("video_current_frame", -1))] = data
+
+        worker.telemetry_updated.connect(_capture)
+
+        with patch.object(worker, "_open_camera", return_value=True):
+            worker.start()
+            worker.start_video_recording(self.out_video_path, start_frame=0, end_frame=15)
+            deadline = time.time() + 8.0
+            while time.time() < deadline:
+                _QT_APP.processEvents()
+                if not worker.is_recording and worker.recorded_frames_count >= 16:
+                    break
+                time.sleep(0.02)
+            worker.stop()
+            _QT_APP.processEvents()
+
+        # Selama tangan masih di ROI 1 (frame 8..11), siklus ditahan dan tidak ghost-trigger
+        for f_hold in range(8, 12):
+            self.assertIn(f_hold, telemetry_by_frame)
+            t = telemetry_by_frame[f_hold]
+            self.assertEqual(t["steps_completed"], 2)
+            self.assertEqual(t["parts_completed"], 1)
+            self.assertIn("Jauhkan tangan dari ROI", t["banner_text"])
+
+        # Setelah 3 frame bersih tanpa tangan di ROI (frame 12..14), siklus baru dimulai bersih
+        self.assertEqual(worker.sequencer.parts_completed, 1)
+        self.assertEqual(worker.sequencer.get_steps_completed(), 0)
+        self.assertEqual(worker.sequencer.statuses, [StepStatus.WAITING, StepStatus.WAITING])
+        self.assertEqual(worker.sequencer.masuk_counts, [0, 0])
+
+
     def test_gui_mainwindow_and_widgets_end_to_end(self) -> None:
         """Menguji integrasi komponen GUI: MainWindow, kontrol frame video, VideoCanvas, dan SettingsDialog."""
         isolated_cfg = AppConfig(jumlah_roi=2, saved_rois=self.rois)

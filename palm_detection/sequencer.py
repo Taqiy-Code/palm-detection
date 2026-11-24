@@ -202,6 +202,16 @@ class StepSequencer:
         for i in range(len(self.error_counts)):
             self.error_counts[i] = 0
 
+    def reset_active_step_debounce(self, step_idx: Optional[int] = None) -> None:
+        """Mereset debounce dan status langkah aktif ke WAITING (0) saat terjadi jumping proses."""
+        target = self.get_active_step() if step_idx is None else step_idx
+        if target is None or not (0 <= target < len(self.statuses)):
+            return
+        if self.statuses[target] != StepStatus.DONE:
+            self.statuses[target] = StepStatus.WAITING
+            self.masuk_counts[target] = 0
+            self.keluar_counts[target] = 0
+
     def handle_cycle_completion(
         self, now: float, cooldown_seconds: float = 1.2
     ) -> Tuple[bool, bool, Optional[SequencerEvent]]:

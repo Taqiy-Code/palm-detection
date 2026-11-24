@@ -518,6 +518,50 @@ class TestStepSequencer(unittest.TestCase):
         self.assertEqual(seq.get_active_step(), 1)
 
 
+    def test_reset_active_step_debounce_on_jumping_process(self) -> None:
+        """Memastikan reset_active_step_debounce membatalkan masuk/keluar langkah aktif tanpa mengubah langkah DONE."""
+        seq = StepSequencer(num_steps=3, debounce_masuk=3, debounce_keluar=4, use_pixel_diff=False)
+
+        # Langkah 0 sedang dalam progres debounce masuk (2/3)
+        seq.process_step_entry(0, True)
+        seq.process_step_entry(0, True)
+        self.assertEqual(seq.masuk_counts[0], 2)
+
+        # Terjadi jumping proses -> reset debounce aktif ke 0
+        seq.reset_active_step_debounce()
+        self.assertEqual(seq.statuses[0], StepStatus.WAITING)
+        self.assertEqual(seq.masuk_counts[0], 0)
+        self.assertEqual(seq.keluar_counts[0], 0)
+
+        # Langkah 0 mencapai HAND_IN dan mulai debounce keluar (2/4)
+        for _ in range(3):
+            seq.process_step_entry(0, True)
+        self.assertEqual(seq.statuses[0], StepStatus.HAND_IN)
+        seq.process_step_exit(0, False)
+        seq.process_step_exit(0, False)
+        self.assertEqual(seq.keluar_counts[0], 2)
+
+        # Terjadi jumping proses -> status batal kembali ke WAITING dan counter masuk/keluar 0
+        seq.reset_active_step_debounce()
+        self.assertEqual(seq.statuses[0], StepStatus.WAITING)
+        self.assertEqual(seq.masuk_counts[0], 0)
+        self.assertEqual(seq.keluar_counts[0], 0)
+
+        # Langkah 0 selesai (DONE), lalu langkah 1 yang direset tidak mengubah langkah 0
+        for _ in range(3):
+            seq.process_step_entry(0, True)
+        for _ in range(4):
+            seq.process_step_exit(0, False)
+        seq.finalize_step_exit(0, None, "Komponen A")
+        self.assertEqual(seq.statuses[0], StepStatus.DONE)
+
+        seq.process_step_entry(1, True)
+        seq.reset_active_step_debounce()
+        self.assertEqual(seq.statuses[0], StepStatus.DONE)
+        self.assertEqual(seq.statuses[1], StepStatus.WAITING)
+        self.assertEqual(seq.masuk_counts[1], 0)
+
+
 
 class TestEndToEndVideoWorkerAndGUI(unittest.TestCase):
     """Pengujian End-to-End penuh untuk CameraWorker (input/output video & kontrol frame) dan GUI."""
@@ -715,6 +759,87 @@ class TestEndToEndVideoWorkerAndGUI(unittest.TestCase):
         self.assertIsNone(worker.referensi)
         self.assertEqual(worker.sequencer.get_steps_completed(), 2)
         self.assertEqual(worker.sequencer.parts_completed, 1)
+
+
+    def test_worker_jumping_process_blocks_and_resets_active_debounce(self) -> None:
+        """Memastikan saat terjadi jumping proses (URUTAN SALAH), debounce langkah aktif berhenti & direset ke 0."""
+        jump_video_path = os.path.join(self.tmpdir, "jump_process.mp4")
+        writer = cv2.VideoWriter(jump_video_path, cv2.VideoWriter_fourcc(*"mp4v"), 30.0, (640, 480))
+        static_frame = np.full((480, 640, 3), 80, dtype=np.uint8)
+        for _ in range(16):
+            writer.write(static_frame)
+        writer.release()
+
+        cfg = AppConfig(
+            jumlah_roi=2,
+            debounce_masuk=2,
+            debounce_keluar=4,
+            use_pixel_diff=False,
+            use_roi_crop=False,
+            use_clahe=False,
+            hand_backend=HandBackend.RTMLIB,
+            hand_tracking_mode=TrackingMode.FULL_HAND,
+        )
+        worker = CameraWorker(cfg)
+
+        # Jadwal skenario:
+        # Frame 0..1  : Tangan masuk ROI 1 -> HAND_IN
+        # Frame 2..4  : Tangan lompat langsung ke ROI 2 (jumping) sebelum keluar ROI 1 selesai
+        #               -> di frame 3 (debounce_err=2), URUTAN SALAH aktif & ROI 1 direset ke WAITING (0)
+        # Frame 5..8  : Dua tangan bersamaan di ROI 1 & ROI 2 (tetap jumping)
+        #               -> debounce masuk ROI 1 TIDAK boleh berjalan sama sekali
+        # Frame 9..15 : Tidak ada tangan -> tidak ada step selesai
+        def fake_detect_hands(frame, rois, config):
+            f_idx = worker.video_current_frame
+            hands = []
+            if 0 <= f_idx <= 1:
+                hands.append(DummyHandDetector.make_hand_at(160, 210, spread=30))
+            elif 2 <= f_idx <= 4:
+                hands.append(DummyHandDetector.make_hand_at(440, 210, spread=30))
+            elif 5 <= f_idx <= 8:
+                hands.append(DummyHandDetector.make_hand_at(160, 210, spread=30))
+                hands.append(DummyHandDetector.make_hand_at(440, 210, spread=30))
+            return hands, [(0, 0, worker.frame_w, worker.frame_h)]
+
+        worker.pipeline.detect_hands = fake_detect_hands  # type: ignore[method-assign]
+        worker.open_video_file(jump_video_path)
+        worker.load_saved_rois(self.rois)
+        worker._process_pending_commands(None)
+
+        telemetry_by_frame = {}
+
+        def _capture_telemetry(data: dict) -> None:
+            telemetry_by_frame[int(data.get("video_current_frame", -1))] = data
+
+        worker.telemetry_updated.connect(_capture_telemetry)
+
+        with patch.object(worker, "_open_camera", return_value=True):
+            worker.start()
+            worker.start_video_recording(self.out_video_path, start_frame=0, end_frame=15)
+            deadline = time.time() + 8.0
+            while time.time() < deadline:
+                _QT_APP.processEvents()
+                if not worker.is_recording and worker.recorded_frames_count >= 16:
+                    break
+                time.sleep(0.02)
+            worker.stop()
+            _QT_APP.processEvents()
+
+        # Pastikan selama jumping proses (frame 3..8), banner ERROR & debounce ROI 1 tidak berjalan
+        for f_err in range(3, 9):
+            self.assertIn(f_err, telemetry_by_frame)
+            t = telemetry_by_frame[f_err]
+            self.assertEqual(t["banner_state"], BannerState.ERROR.value)
+            self.assertEqual(t["rois"][1]["state"], RoiState.ERROR.value)
+            self.assertEqual(t["rois"][0]["state"], RoiState.ACTIVE.value)
+            self.assertEqual(t["rois"][0]["debounce"], "")
+
+        # ROI 1 batal selesai & counter kembali ke 0
+        self.assertEqual(worker.sequencer.statuses[0], StepStatus.WAITING)
+        self.assertEqual(worker.sequencer.masuk_counts[0], 0)
+        self.assertEqual(worker.sequencer.keluar_counts[0], 0)
+        self.assertEqual(worker.sequencer.get_steps_completed(), 0)
+        self.assertEqual(worker.sequencer.parts_completed, 0)
 
 
     def test_gui_mainwindow_and_widgets_end_to_end(self) -> None:

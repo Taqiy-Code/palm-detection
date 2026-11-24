@@ -84,6 +84,7 @@ from palm_detection.renderer import OverlayRenderer, WARNA_ROI_BGR
 from palm_detection.sequencer import StepSequencer
 from palm_detection.states import BannerState, LogLevel, RoiState, StepStatus, TrackingMode
 from palm_detection.vision import (
+    assign_primary_roi_per_hand,
     clean_diff_mask,
     hull_roi_overlap_ratio,
     normalize_and_validate_roi,
@@ -1327,49 +1328,21 @@ class CameraWorker(QThread):
                 debounce_reentry = max(2, int(self.config.debounce_masuk))
                 waiting_ref = use_pixel_diff and self.referensi is None
 
-                # Pass 1: Hitung kehadiran tangan & gerak untuk setiap ROI
+                # Pass 1: Hitung kehadiran tangan (Winner-Takes-All per tangan) & gerak untuk setiap ROI
+                entered_per_roi, model_present_per_roi = assign_primary_roi_per_hand(
+                    rois=self.rois,
+                    hands=tangan,
+                    tracking_mode=self.config.hand_tracking_mode,
+                    overlap_thr=overlap_thr,
+                    active_step_idx=aktif,
+                )
                 roi_hand_flags: List[Tuple[bool, bool, bool]] = []
-                for idx, poly in enumerate(self.rois):
+                for idx in range(len(self.rois)):
                     ada_objek_bergerak = (
                         idx < len(motion_ratios) and motion_ratios[idx] >= self.config.motion_fallback_thr
                     )
-
-                    # Uji apakah tangan masuk ke ROI
-                    tangan_masuk_roi = False
-                    ada_tangan_model = False
-
-                    if self.config.hand_tracking_mode == TrackingMode.FULL_HAND:
-                        for h in tangan:
-                            ov_ratio = hull_roi_overlap_ratio(poly, h["hull"])
-                            pc_in = cv2.pointPolygonTest(
-                                poly, (float(h["palm_center"][0]), float(h["palm_center"][1])), False
-                            ) >= 0
-                            titik_di_roi = sum(
-                                1 for p in h["all_points"]
-                                if cv2.pointPolygonTest(poly, (float(p[0]), float(p[1])), False) >= 0
-                            )
-                            if ov_ratio >= overlap_thr or (pc_in and titik_di_roi >= 5):
-                                tangan_masuk_roi = True
-                            if ov_ratio >= overlap_thr * 0.5 or (pc_in and titik_di_roi >= 3):
-                                ada_tangan_model = True
-
-                    elif self.config.hand_tracking_mode == TrackingMode.PALM_CENTER:
-                        tangan_masuk_roi = any(
-                            cv2.pointPolygonTest(poly, h["palm_center"], False) >= 0 for h in tangan
-                        )
-                        ada_tangan_model = any(
-                            cv2.pointPolygonTest(poly, h["palm_center"], False) >= 0
-                            or sum(cv2.pointPolygonTest(poly, p, False) >= 0 for p in h["dorsum_points"]) >= 2
-                            for h in tangan
-                        )
-                    else:  # FINGERTIPS
-                        jumlah = [
-                            sum(cv2.pointPolygonTest(poly, p, False) >= 0 for p in h["fingertips"])
-                            for h in tangan
-                        ]
-                        tangan_masuk_roi = any(j == 5 for j in jumlah)
-                        ada_tangan_model = any(j >= 2 for j in jumlah)
-
+                    tangan_masuk_roi = entered_per_roi[idx]
+                    ada_tangan_model = model_present_per_roi[idx]
                     ada_tangan_atau_gerak = ada_tangan_model or ada_objek_bergerak
                     roi_hand_flags.append((tangan_masuk_roi, ada_tangan_model, ada_tangan_atau_gerak))
 

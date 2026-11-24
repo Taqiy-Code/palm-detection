@@ -54,6 +54,7 @@ from palm_detection.states import (
     TrackingMode,
 )
 from palm_detection.vision import (
+    assign_primary_roi_per_hand,
     clean_diff_mask,
     hull_roi_overlap_ratio,
     normalize_and_validate_roi,
@@ -233,6 +234,59 @@ class TestAppConfigAndVision(unittest.TestCase):
 
         motion = rasio_gerak_roi(g_after, g_ref, mask, 15, kernel)
         self.assertGreater(motion, 0.40)
+
+    def test_assign_primary_roi_per_hand_winner_takes_all(self) -> None:
+        """Memastikan 1 tangan yang menyenggol ROI tetangga hanya memicu 1 Primary ROI, sedangkan 2 tangan memicu keduanya."""
+        # ROI 1 besar (x=50..250, luas=40000), ROI 2 lebih kecil bersebelahan (x=270..370, luas=20000)
+        roi_1 = np.array([[50, 100], [250, 100], [250, 300], [50, 300]], dtype=np.int32)
+        roi_2 = np.array([[270, 100], [370, 100], [370, 300], [270, 300]], dtype=np.int32)
+
+        def _make_box_hand(x1: int, y1: int, x2: int, y2: int) -> dict:
+            cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+            hull = cv2.convexHull(np.array([[x1, y1], [x2, y1], [x2, y2], [x1, y2]], dtype=np.int32))
+            pts = [(x1, y1), (x2, y1), (x2, y2), (x1, y2), (cx, cy)]
+            return {
+                "fingertips": pts,
+                "palm_center": (cx, cy),
+                "dorsum_points": pts,
+                "all_points": pts,
+                "keypoints_21": pts,
+                "hull": hull,
+            }
+
+        # 1. Satu tangan dominan di ROI 1 (x=120..310 -> pusat di x=215 di dalam ROI 1),
+        #    menyenggol 40x160 = 6400 px di ROI 2 (32% dari luas ROI 2 >= 15%)
+        hand_dom_1 = _make_box_hand(120, 120, 310, 280)
+        self.assertGreater(hull_roi_overlap_ratio(roi_2, hand_dom_1["hull"]), 0.15)
+        entered, present = assign_primary_roi_per_hand(
+            [roi_1, roi_2], [hand_dom_1], TrackingMode.FULL_HAND, overlap_thr=0.15, active_step_idx=0
+        )
+        self.assertEqual(entered, [True, False])
+        self.assertEqual(present, [True, True])
+
+        # 2. Satu tangan dominan di ROI 2 (x=220..360 -> pusat di x=290 di dalam ROI 2), menyenggol ROI 1
+        hand_dom_2 = _make_box_hand(220, 120, 360, 280)
+        entered, _ = assign_primary_roi_per_hand(
+            [roi_1, roi_2], [hand_dom_2], TrackingMode.FULL_HAND, overlap_thr=0.15, active_step_idx=0
+        )
+        self.assertEqual(entered, [False, True])
+
+        # 3. Satu tangan dengan pusat di celah antara ROI 1 & ROI 2 (x=260), irisan absolut lebih besar di ROI 1
+        #    (ROI 1: 90x160=14400 px = 36% ROI 1; ROI 2: 80x160=12800 px = 64% ROI 2!)
+        #    ROI 1 tetap harus menang karena luas irisan absolut lebih besar (14400 > 12800)
+        hand_gap = _make_box_hand(160, 120, 350, 280)  # center x=255 (di celah 250..270)
+        entered, _ = assign_primary_roi_per_hand(
+            [roi_1, roi_2], [hand_gap], TrackingMode.FULL_HAND, overlap_thr=0.15, active_step_idx=1
+        )
+        self.assertEqual(entered, [True, False])
+
+        # 4. Dua tangan terpisah (1 di ROI 1, 1 di ROI 2) -> KEDUANYA harus True agar jumping tetap tertangkap
+        hand_a = _make_box_hand(80, 130, 200, 270)
+        hand_b = _make_box_hand(280, 130, 360, 270)
+        entered, _ = assign_primary_roi_per_hand(
+            [roi_1, roi_2], [hand_a, hand_b], TrackingMode.FULL_HAND, overlap_thr=0.15, active_step_idx=0
+        )
+        self.assertEqual(entered, [True, True])
 
 
 class TestDetectorAndRenderer(unittest.TestCase):
@@ -1341,6 +1395,80 @@ class TestEndToEndVideoWorkerAndGUI(unittest.TestCase):
             _QT_APP.processEvents()
 
         # Dengan hard-reset, langkah 1 tidak mungkin selesai dalam 12 frame; dengan leaky debounce harus DONE
+        self.assertEqual(worker.sequencer.statuses[0], StepStatus.DONE)
+        self.assertEqual(worker.sequencer.get_active_step(), 1)
+
+    def test_worker_single_hand_touching_neighbor_roi_does_not_trigger_wrong_order(self) -> None:
+        """Memastikan 1 tangan yang diam di ROI 1 dan tepinya menyentuh ROI 2 tidak memicu URUTAN SALAH."""
+        adj_video_path = os.path.join(self.tmpdir, "adjacent_roi_overlap.mp4")
+        writer = cv2.VideoWriter(adj_video_path, cv2.VideoWriter_fourcc(*"mp4v"), 30.0, (640, 480))
+        static_frame = np.full((480, 640, 3), 80, dtype=np.uint8)
+        for _ in range(12):
+            writer.write(static_frame)
+        writer.release()
+
+        # ROI 1 & ROI 2 berdekatan (celah hanya 20 px)
+        adj_rois = [
+            [[80, 120], [240, 120], [240, 300], [80, 300]],
+            [[260, 120], [420, 120], [420, 300], [260, 300]],
+        ]
+
+        cfg = AppConfig(
+            jumlah_roi=2,
+            debounce_masuk=3,
+            debounce_keluar=3,
+            hand_overlap_thr=0.15,
+            use_pixel_diff=False,
+            use_roi_crop=False,
+            use_clahe=False,
+            hand_backend=HandBackend.RTMLIB,
+            hand_tracking_mode=TrackingMode.FULL_HAND,
+        )
+        worker = CameraWorker(cfg)
+
+        # Bounding box sarung tangan yang diam di ROI 1 (x=110..310, pusat x=210 di ROI 1)
+        # namun tepinya masuk 50 px ke ROI 2 (~28% luas ROI 2 >= hand_overlap_thr 15%)
+        x1, y1, x2, y2 = 110, 130, 310, 290
+        cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+        spilling_hand = {
+            "fingertips": [(x1, y1), (x2, y1), (cx, y1), (x1, cy), (x2, cy)],
+            "palm_center": (cx, cy),
+            "dorsum_points": [(cx, cy), (x1, y2), (x2, y2)],
+            "all_points": [(x1, y1), (x2, y1), (x2, y2), (x1, y2), (cx, cy)],
+            "keypoints_21": [(cx, cy)] * 21,
+            "hull": cv2.convexHull(np.array([[x1, y1], [x2, y1], [x2, y2], [x1, y2]], dtype=np.int32)),
+        }
+
+        def fake_detect_hands(frame, rois, config):
+            f_idx = worker.video_current_frame
+            # Frame 0..4: tangan diam di ROI 1 sambil menyentuh ROI 2
+            # Frame 5..11: tangan keluar bersih -> ROI 1 harus DONE
+            if 0 <= f_idx <= 4:
+                return [spilling_hand], [(0, 0, worker.frame_w, worker.frame_h)]
+            return [], [(0, 0, worker.frame_w, worker.frame_h)]
+
+        worker.pipeline.detect_hands = fake_detect_hands  # type: ignore[method-assign]
+        worker.open_video_file(adj_video_path)
+        worker.load_saved_rois(adj_rois)
+        worker._process_pending_commands(None)
+
+        telemetry_log: List[dict] = []
+        worker.telemetry_updated.connect(lambda d: telemetry_log.append(d))
+
+        with patch.object(worker, "_open_camera", return_value=True):
+            worker.start()
+            worker.start_video_recording(self.out_video_path, start_frame=0, end_frame=11)
+            deadline = time.time() + 8.0
+            while time.time() < deadline:
+                _QT_APP.processEvents()
+                if not worker.is_recording and worker.recorded_frames_count >= 12:
+                    break
+                time.sleep(0.02)
+            worker.stop()
+            _QT_APP.processEvents()
+
+        # Tidak boleh pernah muncul URUTAN SALAH / Banner ERROR selama 1 tangan diam di ROI 1
+        self.assertFalse(any(t.get("banner_state") == BannerState.ERROR.value for t in telemetry_log))
         self.assertEqual(worker.sequencer.statuses[0], StepStatus.DONE)
         self.assertEqual(worker.sequencer.get_active_step(), 1)
 

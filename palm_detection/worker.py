@@ -634,6 +634,12 @@ class CameraWorker(QThread):
         self._roi_clear_frames = 0
         self._stable_ref_buffer.clear()
 
+    def _reset_cycle_progress(self) -> None:
+        """Mereset status langkah, debounce, dan buffer siklus saat ini tanpa mereset parts_completed."""
+        self.sequencer.clear_statuses()
+        self._init_post_hand_frames()
+        self._roi_clear_frames = 0
+
     def _do_reset_roi(self) -> None:
         self.rois.clear()
         self.masks.clear()
@@ -816,6 +822,7 @@ class CameraWorker(QThread):
                         if roi_idx < len(self.masks):
                             self.masks[roi_idx] = m
                         self.config.saved_rois = [r.tolist() for r in self.rois]
+                        self._reset_cycle_progress()
 
             elif cmd == "rebuild_masks":
                 for i in range(len(self.rois)):
@@ -826,7 +833,8 @@ class CameraWorker(QThread):
                 self.config.saved_rois = [r.tolist() for r in self.rois]
                 self.config.save(CONFIG_FILE)
                 self._invalidate_reference(force=False)
-                self.log_event.emit("INFO", "Bentuk sudut ROI diperbarui.")
+                self._reset_cycle_progress()
+                self.log_event.emit("INFO", "Bentuk sudut ROI diperbarui. Status urutan langkah direset ke Langkah 1.")
 
             elif cmd == "undo_point":
                 if self.titik_klik:
@@ -858,8 +866,12 @@ class CameraWorker(QThread):
                             self.config.saved_rois = [r.tolist() for r in self.rois]
                             self.config.save(CONFIG_FILE)
                             self._invalidate_reference(force=False)
+                            self._reset_cycle_progress()
                             r_name = self.config.get_roi_name(target_idx)
-                            self.log_event.emit("SUCCESS", f"{r_name} berhasil digambar ulang dan disimpan.")
+                            self.log_event.emit(
+                                "SUCCESS",
+                                f"{r_name} berhasil digambar ulang dan disimpan. Status urutan langkah direset ke Langkah 1.",
+                            )
                 elif len(self.rois) < self.config.jumlah_roi:
                     self.titik_klik.append((px, py))
                     if len(self.titik_klik) == 4:
@@ -875,17 +887,16 @@ class CameraWorker(QThread):
                             self.config.saved_rois = [r.tolist() for r in self.rois]
                             self.config.save(CONFIG_FILE)
                             self._invalidate_reference(force=False)
+                            self._reset_cycle_progress()
 
             elif cmd == "recapture_ref":
                 if len(self.rois) == self.config.jumlah_roi:
                     self._invalidate_reference(force=True)
-                    self.sequencer.clear_statuses()
+                    self._reset_cycle_progress()
                     self.log_event.emit("INFO", "Menunggu area kerja bersih untuk mengambil referensi baru...")
 
             elif cmd == "clear_status":
-                self.sequencer.clear_statuses()
-                self._init_post_hand_frames()
-                self._roi_clear_frames = 0
+                self._reset_cycle_progress()
                 self.log_event.emit("INFO", "Status urutan langkah direset manual ke Langkah 1.")
 
             elif cmd == "reset_parts":

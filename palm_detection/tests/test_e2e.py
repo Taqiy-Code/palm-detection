@@ -1049,6 +1049,54 @@ class TestEndToEndVideoWorkerAndGUI(unittest.TestCase):
         self.assertEqual(worker.sequencer.masuk_counts, [0, 0])
 
 
+    def test_worker_roi_edit_and_redo_resets_mid_cycle_step_statuses(self) -> None:
+        """Memastikan geser sudut ROI maupun gambar ulang ROI di tengah siklus mereset status langkah (tanpa mereset part)."""
+        cfg = AppConfig(jumlah_roi=2, use_pixel_diff=False)
+        worker = CameraWorker(cfg)
+        worker.open_video_file(self.in_video_path)
+        worker.load_saved_rois(self.rois)
+        worker._process_pending_commands(None)
+
+        # Simulasikan siklus setengah jalan: Part #3 selesai, ROI 1 sudah DONE, ROI 2 sedang HAND_IN
+        worker.sequencer.parts_completed = 3
+        worker.sequencer.statuses = [StepStatus.DONE, StepStatus.HAND_IN]
+        worker.sequencer.masuk_counts = [0, 2]
+        worker.sequencer.keluar_counts = [0, 1]
+        worker.sequencer.reentry_counts = [1, 0]
+        worker._roi_clear_frames = 4
+
+        # 1. Geser sudut ROI 1 lalu selesai drag (rebuild_masks) -> status & debounce harus reset, parts tetap 3
+        worker.update_roi_vertex(0, 0, 90, 130)
+        worker.finish_roi_vertex_drag()
+        with patch.object(cfg, "save"):
+            worker._process_pending_commands(None)
+
+        self.assertEqual(worker.sequencer.statuses, [StepStatus.WAITING, StepStatus.WAITING])
+        self.assertEqual(worker.sequencer.masuk_counts, [0, 0])
+        self.assertEqual(worker.sequencer.keluar_counts, [0, 0])
+        self.assertEqual(worker.sequencer.reentry_counts, [0, 0])
+        self.assertEqual(worker._roi_clear_frames, 0)
+        self.assertEqual(worker.sequencer.parts_completed, 3)
+
+        # 2. Masuk mode redo_roi lalu BATAL (undo_point) -> progres tidak hilang
+        worker.sequencer.statuses = [StepStatus.DONE, StepStatus.WAITING]
+        worker.trigger_redo_roi(0)
+        worker.undo_roi_point()
+        worker._process_pending_commands(None)
+        self.assertEqual(worker.sequencer.statuses[0], StepStatus.DONE)
+
+        # 3. Gambar ulang ROI 1 sampai selesai (4 titik) -> status langkah direset ke WAITING, parts tetap 3
+        worker.trigger_redo_roi(0)
+        for px, py in [[70, 110], [230, 110], [230, 290], [70, 290]]:
+            worker.add_roi_point(px, py)
+        with patch.object(cfg, "save"):
+            worker._process_pending_commands(None)
+
+        self.assertEqual(worker.sequencer.statuses, [StepStatus.WAITING, StepStatus.WAITING])
+        self.assertEqual(worker.sequencer.get_steps_completed(), 0)
+        self.assertEqual(worker.sequencer.parts_completed, 3)
+
+
     def test_gui_mainwindow_and_widgets_end_to_end(self) -> None:
         """Menguji integrasi komponen GUI: MainWindow, kontrol frame video, VideoCanvas, dan SettingsDialog."""
         isolated_cfg = AppConfig(jumlah_roi=2, saved_rois=self.rois)

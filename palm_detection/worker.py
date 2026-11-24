@@ -153,6 +153,11 @@ class CameraWorker(QThread):
         self.cap: Optional[cv2.VideoCapture] = None
         self.frame_w = config.frame_width
         self.frame_h = config.frame_height
+        self._cam_fail_count: int = 0
+        self._cam_disconnected: bool = False
+        self._cam_last_reconnect_attempt: float = 0.0
+        self._cam_fail_threshold: int = 15
+        self._cam_reconnect_interval: float = 2.0
 
         # State Input Video & Kontrol Frame oleh Pengguna
         self.is_video_mode: bool = False
@@ -479,6 +484,8 @@ class CameraWorker(QThread):
         self.is_video_mode = True
         self.video_path = filepath
         self.video_paused = True
+        self._cam_disconnected = False
+        self._cam_fail_count = 0
         self._step_once = False
         self._needs_process_current = False
 
@@ -577,12 +584,17 @@ class CameraWorker(QThread):
             if cap_obj is not None:
                 _release_capture_safe(cap_obj)
             self.cap = None
+            self._cam_disconnected = True
             self.camera_info_ready.emit(f"Gagal membuka Kamera Index {self.config.camera_index}")
             return False
 
         with self._cap_lock:
             self.cap = cap_obj
             self._opened_captures.append(cap_obj)
+
+        self._cam_disconnected = False
+        self._cam_fail_count = 0
+        self._prev_gray = None
 
         if frame is not None:
             self.frame_h, self.frame_w = frame.shape[:2]
@@ -946,8 +958,110 @@ class CameraWorker(QThread):
         finally:
             self._cleanup_resources()
 
+    def _emit_camera_disconnected_state(self) -> None:
+        """Mengirimkan frame peringatan dan telemetri ERROR saat kamera live terputus."""
+        w = max(320, int(self.frame_w or 640))
+        h = max(240, int(self.frame_h or 480))
+        placeholder = np.full((h, w, 3), (20, 20, 35), dtype=np.uint8)
+        msg_main = "KAMERA TERPUTUS"
+        msg_sub = "Mencoba menyambungkan ulang secara otomatis..."
+        (tw1, th1), _ = cv2.getTextSize(msg_main, cv2.FONT_HERSHEY_SIMPLEX, 1.0, 2)
+        (tw2, _), _ = cv2.getTextSize(msg_sub, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)
+        cv2.putText(
+            placeholder,
+            msg_main,
+            (max(10, (w - tw1) // 2), max(40, h // 2 - 10)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1.0,
+            (80, 80, 255),
+            2,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            placeholder,
+            msg_sub,
+            (max(10, (w - tw2) // 2), min(h - 20, h // 2 + th1 + 16)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (200, 210, 230),
+            1,
+            cv2.LINE_AA,
+        )
+
+        try:
+            rgb_out = cv2.cvtColor(placeholder, cv2.COLOR_BGR2RGB)
+            qimg = QImage(rgb_out.data, w, h, 3 * w, QImage.Format_RGB888).copy()
+            self.frame_ready.emit(qimg, w, h)
+        except Exception:
+            pass
+
+        jumlah_roi = self.config.jumlah_roi
+        telemetry_data = {
+            "banner_text": "KAMERA TERPUTUS! Mencoba menyambungkan ulang secara otomatis...",
+            "banner_state": BannerState.ERROR.value,
+            "rois": [
+                {
+                    "index": i,
+                    "name": self.config.get_roi_name(i),
+                    "state": RoiState.LOCKED.value,
+                    "label": "Kamera Terputus",
+                    "ratio": self.sequencer.last_ratios[i] if i < len(self.sequencer.last_ratios) else 0.0,
+                    "diff_ratio": self.sequencer.last_ratios[i] if i < len(self.sequencer.last_ratios) else 0.0,
+                    "ambang_rasio": self.config.ambang_rasio,
+                    "use_pixel_diff": bool(getattr(self.config, "use_pixel_diff", False)),
+                    "debounce": "",
+                }
+                for i in range(jumlah_roi)
+            ],
+            "rois_coords": [r.tolist() for r in self.rois],
+            "fps": 0.0,
+            "camera_connected": False,
+            "has_reference": self.referensi is not None,
+            "use_pixel_diff": bool(getattr(self.config, "use_pixel_diff", False)),
+            "roi_defined": len(self.rois),
+            "roi_total": jumlah_roi,
+            "steps_completed": self.sequencer.get_steps_completed(),
+            "parts_completed": self.sequencer.parts_completed,
+            "is_video_mode": False,
+            "video_path": "",
+            "video_paused": False,
+            "video_fps": self.video_fps,
+            "video_total_frames": self.video_total_frames,
+            "video_current_frame": self.video_current_frame,
+            "video_start_frame": self.video_start_frame,
+            "video_end_frame": self.video_end_frame,
+            "is_recording": False,
+            "recording_path": "",
+            "recorded_frames_count": self.recorded_frames_count,
+        }
+        with self._web_lock:
+            self._latest_bgr_frame = placeholder
+            self._latest_telemetry = telemetry_data
+        self.telemetry_updated.emit(telemetry_data)
+
+    def _handle_camera_disconnect(self) -> None:
+        """Menangani pemutusan kamera live: hentikan rekaman, lepas handle lama, dan beritahu UI."""
+        if self.is_recording:
+            self._stop_recording_internal(completed=False)
+        self._release_all_worker_captures()
+        self._prev_gray = None
+        self.sequencer.reset_active_step_debounce()
+        self._cam_disconnected = True
+        self._cam_fail_count = 0
+        self._cam_last_reconnect_attempt = time.perf_counter()
+        self.camera_info_ready.emit(
+            f"Kamera #{self.config.camera_index} terputus — mencoba menyambung ulang..."
+        )
+        self.log_event.emit(
+            LogLevel.WARN.value,
+            f"Kamera #{self.config.camera_index} terputus! Mencoba menyambungkan ulang secara otomatis...",
+        )
+        self._emit_camera_disconnected_state()
+
     def _run_worker_loop(self) -> None:
-        self._open_camera()
+        opened = self._open_camera()
+        if not opened and not self.is_video_mode:
+            self._cam_last_reconnect_attempt = time.perf_counter()
 
         # Muat ROI tersimpan
         if self.config.saved_rois and len(self.config.saved_rois) == self.config.jumlah_roi:
@@ -961,6 +1075,18 @@ class CameraWorker(QThread):
             self._process_pending_commands(self._prev_gray)
 
             if self.cap is None or not self.cap.isOpened():
+                if not self.is_video_mode and self._cam_disconnected:
+                    now_rc = time.perf_counter()
+                    if now_rc - self._cam_last_reconnect_attempt >= self._cam_reconnect_interval:
+                        self._cam_last_reconnect_attempt = now_rc
+                        if self._open_camera():
+                            self.log_event.emit(
+                                LogLevel.SUCCESS.value,
+                                f"Kamera #{self.config.camera_index} berhasil tersambung kembali.",
+                            )
+                            prev_time = time.perf_counter()
+                            continue
+                        self._emit_camera_disconnected_state()
                 time.sleep(0.05)
                 continue
 
@@ -972,8 +1098,13 @@ class CameraWorker(QThread):
                 if not self.running:
                     break
                 if not ok or raw is None:
-                    time.sleep(0.01)
+                    self._cam_fail_count += 1
+                    if self._cam_fail_count >= self._cam_fail_threshold:
+                        self._handle_camera_disconnect()
+                    else:
+                        time.sleep(0.01)
                     continue
+                self._cam_fail_count = 0
                 self._raw_frame = raw
                 frame = raw.copy()
                 is_new_frame = True
@@ -1513,6 +1644,7 @@ class CameraWorker(QThread):
                 "rois": roi_telemetry,
                 "rois_coords": [r.tolist() for r in self.rois],
                 "fps": fps,
+                "camera_connected": True,
                 "has_reference": self.referensi is not None,
                 "use_pixel_diff": bool(getattr(self.config, "use_pixel_diff", False)),
                 "roi_defined": len(self.rois),

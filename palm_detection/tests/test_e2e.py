@@ -465,7 +465,6 @@ class TestDetectorAndRenderer(unittest.TestCase):
 
         pipeline.close()
 
-
     def test_overlay_renderer_all_modes(self) -> None:
         renderer = OverlayRenderer()
         frame = np.zeros((480, 640, 3), dtype=np.uint8)
@@ -581,7 +580,6 @@ class TestStepSequencer(unittest.TestCase):
         self.assertEqual(seq.statuses[0], StepStatus.DONE)
         self.assertEqual(seq.get_active_step(), 1)
 
-
     def test_reset_active_step_debounce_on_jumping_process(self) -> None:
         """Memastikan reset_active_step_debounce membatalkan masuk/keluar langkah aktif tanpa mengubah langkah DONE."""
         seq = StepSequencer(num_steps=3, debounce_masuk=3, debounce_keluar=4, use_pixel_diff=False)
@@ -625,7 +623,6 @@ class TestStepSequencer(unittest.TestCase):
         self.assertEqual(seq.statuses[1], StepStatus.WAITING)
         self.assertEqual(seq.masuk_counts[1], 0)
 
-
     def test_done_step_reentry_detection(self) -> None:
         """Memastikan process_done_step_reentry hanya aktif pada ROI DONE dengan debounce dan dapat direset."""
         seq = StepSequencer(num_steps=2, debounce_masuk=2, debounce_keluar=2, use_pixel_diff=False)
@@ -657,8 +654,6 @@ class TestStepSequencer(unittest.TestCase):
         self.assertEqual(seq.reentry_counts[0], 1)
         seq.clear_error_counts()
         self.assertEqual(seq.reentry_counts[0], 0)
-
-
 
 
 class TestEndToEndVideoWorkerAndGUI(unittest.TestCase):
@@ -858,7 +853,6 @@ class TestEndToEndVideoWorkerAndGUI(unittest.TestCase):
         self.assertEqual(worker.sequencer.get_steps_completed(), 2)
         self.assertEqual(worker.sequencer.parts_completed, 1)
 
-
     def test_worker_jumping_process_blocks_and_resets_active_debounce(self) -> None:
         """Memastikan saat terjadi jumping proses (URUTAN SALAH), debounce langkah aktif berhenti & direset ke 0."""
         jump_video_path = os.path.join(self.tmpdir, "jump_process.mp4")
@@ -938,7 +932,6 @@ class TestEndToEndVideoWorkerAndGUI(unittest.TestCase):
         self.assertEqual(worker.sequencer.keluar_counts[0], 0)
         self.assertEqual(worker.sequencer.get_steps_completed(), 0)
         self.assertEqual(worker.sequencer.parts_completed, 0)
-
 
     def test_worker_double_pick_on_done_roi_warns_and_resets_active_debounce(self) -> None:
         """Memastikan akses ulang ke ROI DONE memicu peringatan DOUBLE PICK dan mereset debounce aktif."""
@@ -1022,7 +1015,6 @@ class TestEndToEndVideoWorkerAndGUI(unittest.TestCase):
         self.assertEqual(telemetry_by_frame[8]["rois"][0]["state"], RoiState.DONE.value)
         self.assertEqual(worker.sequencer.get_steps_completed(), 2)
         self.assertEqual(worker.sequencer.parts_completed, 1)
-
 
     def test_worker_auto_cycle_waits_until_rois_clear_without_pixel_diff(self) -> None:
         """Memastikan siklus baru (use_pixel_diff=False) menunggu seluruh ROI bebas tangan sebelum reset."""
@@ -1112,7 +1104,6 @@ class TestEndToEndVideoWorkerAndGUI(unittest.TestCase):
         self.assertEqual(worker.sequencer.statuses, [StepStatus.WAITING, StepStatus.WAITING])
         self.assertEqual(worker.sequencer.masuk_counts, [0, 0])
 
-
     def test_worker_roi_edit_and_redo_resets_mid_cycle_step_statuses(self) -> None:
         """Memastikan geser sudut ROI maupun gambar ulang ROI di tengah siklus mereset status langkah (tanpa mereset part)."""
         cfg = AppConfig(jumlah_roi=2, use_pixel_diff=False)
@@ -1160,6 +1151,85 @@ class TestEndToEndVideoWorkerAndGUI(unittest.TestCase):
         self.assertEqual(worker.sequencer.get_steps_completed(), 0)
         self.assertEqual(worker.sequencer.parts_completed, 3)
 
+    def test_worker_live_camera_disconnect_notifies_and_auto_reconnects(self) -> None:
+        """Memastikan kamera live yang terputus memunculkan notifikasi ERROR dan otomatis menyambung kembali."""
+        cfg = AppConfig(jumlah_roi=2, use_pixel_diff=False, use_roi_crop=False, use_clahe=False)
+        worker = CameraWorker(cfg)
+        worker._cam_fail_threshold = 3
+        worker._cam_reconnect_interval = 0.05
+
+        dummy_frame = np.full((240, 320, 3), 60, dtype=np.uint8)
+
+        class FakeCap:
+            def __init__(self, fail_after: int | None) -> None:
+                self.fail_after = fail_after
+                self.reads = 0
+                self.opened = True
+
+            def isOpened(self) -> bool:
+                return self.opened
+
+            def read(self):
+                self.reads += 1
+                if self.fail_after is not None and self.reads > self.fail_after:
+                    return False, None
+                return True, dummy_frame.copy()
+
+            def release(self) -> None:
+                self.opened = False
+
+        open_calls = {"count": 0}
+
+        def fake_open_camera() -> bool:
+            open_calls["count"] += 1
+            # Panggilan 1: kamera berhasil terbuka lalu putus setelah 2 frame
+            # Panggilan 2: gagal reconnect sekali
+            # Panggilan 3: berhasil tersambung kembali secara stabil
+            if open_calls["count"] == 1:
+                worker.cap = FakeCap(fail_after=2)  # type: ignore[assignment]
+                worker.frame_w, worker.frame_h = 320, 240
+                worker._cam_disconnected = False
+                worker._cam_fail_count = 0
+                return True
+            if open_calls["count"] == 2:
+                worker.cap = None
+                worker._cam_disconnected = True
+                return False
+            worker.cap = FakeCap(fail_after=None)  # type: ignore[assignment]
+            worker.frame_w, worker.frame_h = 320, 240
+            worker._cam_disconnected = False
+            worker._cam_fail_count = 0
+            return True
+
+        telemetry_log: List[dict] = []
+        event_logs: List[Tuple[str, str]] = []
+        worker.telemetry_updated.connect(lambda d: telemetry_log.append(d))
+        worker.log_event.connect(lambda lvl, msg: event_logs.append((lvl, msg)))
+        worker.pipeline.detect_hands = lambda frame, rois, config: ([], [(0, 0, 320, 240)])  # type: ignore[method-assign]
+
+        with patch.object(worker, "_open_camera", side_effect=fake_open_camera):
+            worker.start()
+            deadline = time.time() + 4.0
+            while time.time() < deadline:
+                _QT_APP.processEvents()
+                if any("berhasil tersambung kembali" in msg for _, msg in event_logs):
+                    break
+                time.sleep(0.02)
+            worker.stop()
+            _QT_APP.processEvents()
+
+        self.assertGreaterEqual(open_calls["count"], 3)
+        self.assertTrue(any(lvl == LogLevel.WARN.value and "terputus" in msg.lower() for lvl, msg in event_logs))
+        self.assertTrue(
+            any(lvl == LogLevel.SUCCESS.value and "tersambung kembali" in msg.lower() for lvl, msg in event_logs)
+        )
+        self.assertTrue(
+            any(
+                t.get("banner_state") == BannerState.ERROR.value and t.get("camera_connected") is False
+                for t in telemetry_log
+            )
+        )
+        self.assertTrue(any(t.get("camera_connected") is True for t in telemetry_log))
 
     def test_gui_mainwindow_and_widgets_end_to_end(self) -> None:
         """Menguji integrasi komponen GUI: MainWindow, kontrol frame video, VideoCanvas, dan SettingsDialog."""

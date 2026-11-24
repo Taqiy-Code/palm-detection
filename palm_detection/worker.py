@@ -1175,8 +1175,10 @@ class CameraWorker(QThread):
 
                 aktif = self.sequencer.get_active_step()
                 salah_urut: Optional[int] = None
+                double_pick: Optional[int] = None
                 overlap_thr = float(self.config.hand_overlap_thr)
                 debounce_err = 2  # Minimal 2 frame untuk mencegah false alarm 1-frame flicker
+                debounce_reentry = max(2, int(self.config.debounce_masuk))
                 waiting_ref = use_pixel_diff and self.referensi is None
 
                 # Pass 1: Hitung kehadiran tangan & gerak untuk setiap ROI
@@ -1225,29 +1227,43 @@ class CameraWorker(QThread):
                     ada_tangan_atau_gerak = ada_tangan_model or ada_objek_bergerak
                     roi_hand_flags.append((tangan_masuk_roi, ada_tangan_atau_gerak))
 
-                # Evaluasi seluruh langkah terkunci terlebih dahulu untuk mendeteksi jumping proses
+                # Evaluasi seluruh langkah terkunci (jumping) & langkah DONE (double-pick) terlebih dahulu
                 locked_errors: Dict[int, bool] = {}
-                if not waiting_ref:
+                done_reentry_errors: Dict[int, bool] = {}
+                if not waiting_ref and aktif is not None:
                     for idx in range(len(self.rois)):
-                        if self.sequencer.statuses[idx] == StepStatus.DONE or idx == aktif:
+                        if idx == aktif:
                             continue
                         tangan_masuk_roi = roi_hand_flags[idx][0]
-                        if is_new_frame:
-                            is_err = self.sequencer.process_locked_step(idx, tangan_masuk_roi, debounce_err)
+                        if self.sequencer.statuses[idx] == StepStatus.DONE:
+                            if is_new_frame:
+                                is_reentry = self.sequencer.process_done_step_reentry(
+                                    idx, tangan_masuk_roi, debounce_reentry
+                                )
+                            else:
+                                is_reentry = tangan_masuk_roi or (
+                                    self.sequencer.reentry_counts[idx] >= debounce_reentry
+                                )
+                            done_reentry_errors[idx] = is_reentry
+                            if is_reentry and double_pick is None:
+                                double_pick = idx
                         else:
-                            is_err = tangan_masuk_roi or (self.sequencer.error_counts[idx] >= debounce_err)
-                        locked_errors[idx] = is_err
-                        if is_err and salah_urut is None:
-                            salah_urut = idx
+                            if is_new_frame:
+                                is_err = self.sequencer.process_locked_step(idx, tangan_masuk_roi, debounce_err)
+                            else:
+                                is_err = tangan_masuk_roi or (self.sequencer.error_counts[idx] >= debounce_err)
+                            locked_errors[idx] = is_err
+                            if is_err and salah_urut is None:
+                                salah_urut = idx
 
-                # Jika terjadi jumping proses (kesalahan step), hentikan dan reset debounce langkah aktif ke 0
-                jumping_error = salah_urut is not None
-                if jumping_error and aktif is not None and is_new_frame:
+                # Jika terjadi jumping proses atau double-pick, hentikan dan reset debounce langkah aktif ke 0
+                step_violation = (salah_urut is not None) or (double_pick is not None)
+                if step_violation and aktif is not None and is_new_frame:
                     self.sequencer.reset_active_step_debounce(aktif)
                     if aktif < len(self._post_hand_frames):
                         self._post_hand_frames[aktif].clear()
 
-                # Pass 2: Evaluasi langkah aktif (hanya jika tidak ada jumping proses) & render overlay
+                # Pass 2: Evaluasi langkah aktif (hanya jika tidak ada pelanggaran step) & render overlay
                 for idx, poly in enumerate(self.rois):
                     tangan_masuk_roi, ada_tangan_atau_gerak = roi_hand_flags[idx]
                     debounce_info = ""
@@ -1257,10 +1273,14 @@ class CameraWorker(QThread):
                         roi_state = RoiState.WAIT_REF
                         teks = f"Menunggu Ref Bersih ({self._no_hand_frames}/{needed_clean})"
                     elif self.sequencer.statuses[idx] == StepStatus.DONE:
-                        roi_state = RoiState.DONE
-                        teks = "DONE"
+                        if done_reentry_errors.get(idx, False):
+                            roi_state = RoiState.ERROR
+                            teks = "DOUBLE PICK"
+                        else:
+                            roi_state = RoiState.DONE
+                            teks = "DONE"
                     elif idx == aktif:
-                        if is_new_frame and not jumping_error:
+                        if is_new_frame and not step_violation:
                             # Langkah aktif: proses masuk
                             if self.sequencer.statuses[idx] == StepStatus.WAITING:
                                 _, debounce_info = self.sequencer.process_step_entry(idx, tangan_masuk_roi)
@@ -1308,7 +1328,7 @@ class CameraWorker(QThread):
                             roi_state = RoiState.DONE
                             teks = "DONE"
                         elif self.sequencer.statuses[idx] == StepStatus.HAND_IN or (
-                            not is_new_frame and tangan_masuk_roi and not jumping_error
+                            not is_new_frame and tangan_masuk_roi and not step_violation
                         ):
                             roi_state = RoiState.HAND_IN
                             teks = "Tangan di ROI"
@@ -1406,6 +1426,17 @@ class CameraWorker(QThread):
                             self.log_event.emit(
                                 LogLevel.WARN.value,
                                 f"Urutan salah! Tangan di [{wrong_name}] (Seharusnya [{target_name}])",
+                            )
+                    elif double_pick is not None:
+                        target_name = self.config.get_roi_name(aktif_now)
+                        done_name = self.config.get_roi_name(double_pick)
+                        banner_text = f"DOUBLE PICK! [{done_name}] sudah selesai, lanjut ke [{target_name}]"
+                        banner_state = BannerState.ERROR
+                        if is_new_frame and now - self.sequencer.last_error_log_time > 2.0:
+                            self.sequencer.last_error_log_time = now
+                            self.log_event.emit(
+                                LogLevel.WARN.value,
+                                f"Double pick terdeteksi! Tangan kembali ke [{done_name}] yang sudah selesai (Lanjut ke [{target_name}])",
                             )
                     else:
                         step_name = self.config.get_roi_name(aktif_now)

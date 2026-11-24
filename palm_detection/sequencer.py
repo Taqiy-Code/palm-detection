@@ -48,6 +48,7 @@ class StepSequencer:
         self.masuk_counts: List[int] = []
         self.keluar_counts: List[int] = []
         self.error_counts: List[int] = []
+        self.reentry_counts: List[int] = []
         self.last_ratios: List[float] = []
 
         self.parts_completed: int = 0
@@ -65,6 +66,7 @@ class StepSequencer:
         self.masuk_counts = [0] * n
         self.keluar_counts = [0] * n
         self.error_counts = [0] * n
+        self.reentry_counts = [0] * n
         self.last_ratios = [0.0] * n
         self.cycle_cooldown_until = None
 
@@ -75,6 +77,7 @@ class StepSequencer:
         self.masuk_counts = [0] * n
         self.keluar_counts = [0] * n
         self.error_counts = [0] * n
+        self.reentry_counts = [0] * n
         self.cycle_cooldown_until = None
 
     def reset_parts(self) -> None:
@@ -91,6 +94,7 @@ class StepSequencer:
             self.masuk_counts.extend([0] * diff)
             self.keluar_counts.extend([0] * diff)
             self.error_counts.extend([0] * diff)
+            self.reentry_counts.extend([0] * diff)
             self.last_ratios.extend([0.0] * diff)
 
     def get_active_step(self) -> Optional[int]:
@@ -197,10 +201,27 @@ class StepSequencer:
             self.error_counts[step_idx] = 0
         return self.error_counts[step_idx] >= max(1, debounce_err)
 
+    def process_done_step_reentry(
+        self, step_idx: int, hand_in_roi: bool, debounce_reentry: int = 3
+    ) -> bool:
+        """Memproses debounce akses ulang (double-pick) pada ROI yang sudah berstatus DONE."""
+        if step_idx >= len(self.reentry_counts):
+            return False
+        if self.statuses[step_idx] != StepStatus.DONE:
+            self.reentry_counts[step_idx] = 0
+            return False
+        if hand_in_roi:
+            self.reentry_counts[step_idx] += 1
+        else:
+            self.reentry_counts[step_idx] = 0
+        return self.reentry_counts[step_idx] >= max(1, debounce_reentry)
+
     def clear_error_counts(self) -> None:
-        """Mengosongkan counter error seluruh ROI."""
+        """Mengosongkan counter error dan counter akses ulang seluruh ROI."""
         for i in range(len(self.error_counts)):
             self.error_counts[i] = 0
+        for i in range(len(self.reentry_counts)):
+            self.reentry_counts[i] = 0
 
     def reset_active_step_debounce(self, step_idx: Optional[int] = None) -> None:
         """Mereset debounce dan status langkah aktif ke WAITING (0) saat terjadi jumping proses."""

@@ -562,6 +562,40 @@ class TestStepSequencer(unittest.TestCase):
         self.assertEqual(seq.masuk_counts[1], 0)
 
 
+    def test_done_step_reentry_detection(self) -> None:
+        """Memastikan process_done_step_reentry hanya aktif pada ROI DONE dengan debounce dan dapat direset."""
+        seq = StepSequencer(num_steps=2, debounce_masuk=2, debounce_keluar=2, use_pixel_diff=False)
+
+        # Sebelum DONE, akses ke ROI 0 tidak dianggap double-pick
+        self.assertFalse(seq.process_done_step_reentry(0, True, debounce_reentry=2))
+        self.assertEqual(seq.reentry_counts[0], 0)
+
+        # Selesaikan langkah 0
+        seq.process_step_entry(0, True)
+        seq.process_step_entry(0, True)
+        seq.process_step_exit(0, False)
+        seq.process_step_exit(0, False)
+        seq.finalize_step_exit(0, None, "Komponen A")
+        self.assertEqual(seq.statuses[0], StepStatus.DONE)
+
+        # Tangan kembali ke ROI 0 (butuh 2 frame)
+        self.assertFalse(seq.process_done_step_reentry(0, True, debounce_reentry=2))
+        self.assertTrue(seq.process_done_step_reentry(0, True, debounce_reentry=2))
+        self.assertEqual(seq.statuses[0], StepStatus.DONE)
+
+        # Tangan keluar -> kembali normal, status tetap DONE
+        self.assertFalse(seq.process_done_step_reentry(0, False, debounce_reentry=2))
+        self.assertEqual(seq.reentry_counts[0], 0)
+        self.assertEqual(seq.statuses[0], StepStatus.DONE)
+
+        # clear_error_counts ikut mengosongkan reentry_counts
+        seq.process_done_step_reentry(0, True, debounce_reentry=2)
+        self.assertEqual(seq.reentry_counts[0], 1)
+        seq.clear_error_counts()
+        self.assertEqual(seq.reentry_counts[0], 0)
+
+
+
 
 class TestEndToEndVideoWorkerAndGUI(unittest.TestCase):
     """Pengujian End-to-End penuh untuk CameraWorker (input/output video & kontrol frame) dan GUI."""
@@ -840,6 +874,90 @@ class TestEndToEndVideoWorkerAndGUI(unittest.TestCase):
         self.assertEqual(worker.sequencer.keluar_counts[0], 0)
         self.assertEqual(worker.sequencer.get_steps_completed(), 0)
         self.assertEqual(worker.sequencer.parts_completed, 0)
+
+
+    def test_worker_double_pick_on_done_roi_warns_and_resets_active_debounce(self) -> None:
+        """Memastikan akses ulang ke ROI DONE memicu peringatan DOUBLE PICK dan mereset debounce aktif."""
+        dp_video_path = os.path.join(self.tmpdir, "double_pick.mp4")
+        writer = cv2.VideoWriter(dp_video_path, cv2.VideoWriter_fourcc(*"mp4v"), 30.0, (640, 480))
+        static_frame = np.full((480, 640, 3), 80, dtype=np.uint8)
+        for _ in range(17):
+            writer.write(static_frame)
+        writer.release()
+
+        cfg = AppConfig(
+            jumlah_roi=2,
+            debounce_masuk=2,
+            debounce_keluar=2,
+            use_pixel_diff=False,
+            use_roi_crop=False,
+            use_clahe=False,
+            hand_backend=HandBackend.RTMLIB,
+            hand_tracking_mode=TrackingMode.FULL_HAND,
+        )
+        worker = CameraWorker(cfg)
+
+        # Jadwal skenario:
+        # Frame 0..1  : Tangan masuk ROI 1 -> HAND_IN
+        # Frame 2..3  : Tidak ada tangan -> ROI 1 DONE, aktif pindah ke ROI 2
+        # Frame 4     : Tangan masuk ROI 2 (masuk_counts[1] = 1)
+        # Frame 5..7  : Tangan kembali ke ROI 1 (DONE) sambil tangan lain di ROI 2
+        #               -> Frame 6..7 memicu DOUBLE PICK & mereset debounce ROI 2
+        # Frame 8..10 : Tangan hanya di ROI 2 -> ROI 1 kembali DONE, ROI 2 masuk HAND_IN
+        # Frame 11..16: Tidak ada tangan -> ROI 2 DONE, Part #1 selesai
+        def fake_detect_hands(frame, rois, config):
+            f_idx = worker.video_current_frame
+            hands = []
+            if 0 <= f_idx <= 1:
+                hands.append(DummyHandDetector.make_hand_at(160, 210, spread=30))
+            elif f_idx == 4:
+                hands.append(DummyHandDetector.make_hand_at(440, 210, spread=30))
+            elif 5 <= f_idx <= 7:
+                hands.append(DummyHandDetector.make_hand_at(160, 210, spread=30))
+                hands.append(DummyHandDetector.make_hand_at(440, 210, spread=30))
+            elif 8 <= f_idx <= 10:
+                hands.append(DummyHandDetector.make_hand_at(440, 210, spread=30))
+            return hands, [(0, 0, worker.frame_w, worker.frame_h)]
+
+        worker.pipeline.detect_hands = fake_detect_hands  # type: ignore[method-assign]
+        worker.open_video_file(dp_video_path)
+        worker.load_saved_rois(self.rois)
+        worker._process_pending_commands(None)
+
+        telemetry_by_frame = {}
+
+        def _capture(data: dict) -> None:
+            telemetry_by_frame[int(data.get("video_current_frame", -1))] = data
+
+        worker.telemetry_updated.connect(_capture)
+
+        with patch.object(worker, "_open_camera", return_value=True):
+            worker.start()
+            worker.start_video_recording(self.out_video_path, start_frame=0, end_frame=16)
+            deadline = time.time() + 8.0
+            while time.time() < deadline:
+                _QT_APP.processEvents()
+                if not worker.is_recording and worker.recorded_frames_count >= 17:
+                    break
+                time.sleep(0.02)
+            worker.stop()
+            _QT_APP.processEvents()
+
+        # Frame 6..7: DOUBLE PICK aktif pada ROI 1, debounce ROI 2 diblokir/kosong
+        for f_dp in (6, 7):
+            self.assertIn(f_dp, telemetry_by_frame)
+            t = telemetry_by_frame[f_dp]
+            self.assertEqual(t["banner_state"], BannerState.ERROR.value)
+            self.assertIn("DOUBLE PICK", t["banner_text"])
+            self.assertEqual(t["rois"][0]["state"], RoiState.ERROR.value)
+            self.assertEqual(t["rois"][0]["label"], "DOUBLE PICK")
+            self.assertEqual(t["rois"][1]["state"], RoiState.ACTIVE.value)
+            self.assertEqual(t["rois"][1]["debounce"], "")
+
+        # Setelah tangan keluar dari ROI 1, alur lanjut normal hingga Part #1 selesai
+        self.assertEqual(telemetry_by_frame[8]["rois"][0]["state"], RoiState.DONE.value)
+        self.assertEqual(worker.sequencer.get_steps_completed(), 2)
+        self.assertEqual(worker.sequencer.parts_completed, 1)
 
 
     def test_gui_mainwindow_and_widgets_end_to_end(self) -> None:

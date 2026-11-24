@@ -657,8 +657,10 @@ class HandDetectionPipeline:
         self._cached_clahe_limit = -1.0
 
     def get_rtm(self, score_thr: float) -> RTMHandDetector:
-        if self.rtm_detector is None or abs(self.rtm_detector.score_thr - score_thr) > 1e-3:
+        if self.rtm_detector is None:
             self.rtm_detector = RTMHandDetector(score_thr=score_thr)
+        else:
+            self.rtm_detector.score_thr = float(score_thr)
         return self.rtm_detector
 
     def get_yolo(
@@ -669,17 +671,16 @@ class HandDetectionPipeline:
     ) -> YOLOPoseHandDetector:
         resolved_path = resolve_yolo_model_path(model_path)
         norm_target = str(target_classes if target_classes is not None else "gloves").strip()
-        if (
-            self.yolo_detector is None
-            or self.yolo_detector.model_path != resolved_path
-            or abs(self.yolo_detector.score_thr - score_thr) > 1e-3
-        ):
+        if self.yolo_detector is None or self.yolo_detector.model_path != resolved_path:
+            if self.yolo_detector is not None:
+                self.yolo_detector.close()
             self.yolo_detector = YOLOPoseHandDetector(
                 model_path=resolved_path,
                 score_thr=score_thr,
                 target_classes=norm_target,
             )
         else:
+            self.yolo_detector.score_thr = float(score_thr)
             self.yolo_detector.target_classes = norm_target
         return self.yolo_detector
 

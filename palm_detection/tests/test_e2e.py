@@ -402,6 +402,70 @@ class TestDetectorAndRenderer(unittest.TestCase):
             if os.path.exists(dummy_model_file):
                 os.remove(dummy_model_file)
 
+    def test_pipeline_updates_score_thr_inplace_without_reloading_models(self) -> None:
+        """Memastikan perubahan score_thr pada RTMlib dan YOLO diperbarui in-place tanpa reload model dari disk."""
+        pipeline = HandDetectionPipeline()
+
+        class FakeRTM:
+            init_count = 0
+
+            def __init__(self, score_thr: float = 0.35, device: str = "cpu") -> None:
+                FakeRTM.init_count += 1
+                self.score_thr = float(score_thr)
+
+            def close(self) -> None:
+                pass
+
+        class FakeYOLO:
+            init_count = 0
+            closed_count = 0
+
+            def __init__(
+                self,
+                model_path: str = "yolo26n-pose.pt",
+                score_thr: float = 0.35,
+                device: str = "cpu",
+                target_classes: str = "gloves",
+            ) -> None:
+                FakeYOLO.init_count += 1
+                self.model_path = model_path
+                self.score_thr = float(score_thr)
+                self.target_classes = target_classes
+
+            def close(self) -> None:
+                FakeYOLO.closed_count += 1
+
+        with (
+            patch("palm_detection.detector.RTMHandDetector", FakeRTM),
+            patch("palm_detection.detector.YOLOPoseHandDetector", FakeYOLO),
+        ):
+            # RTM: geser score_thr berkali-kali -> hanya 1x inisialisasi
+            r1 = pipeline.get_rtm(0.35)
+            r2 = pipeline.get_rtm(0.55)
+            r3 = pipeline.get_rtm(0.70)
+            self.assertIs(r1, r2)
+            self.assertIs(r2, r3)
+            self.assertEqual(FakeRTM.init_count, 1)
+            self.assertAlmostEqual(r3.score_thr, 0.70)
+
+            # YOLO: geser score_thr & target_classes pada model sama -> hanya 1x inisialisasi
+            y1 = pipeline.get_yolo("model_a.pt", 0.35, "gloves")
+            y2 = pipeline.get_yolo("model_a.pt", 0.60, "hand")
+            self.assertIs(y1, y2)
+            self.assertEqual(FakeYOLO.init_count, 1)
+            self.assertAlmostEqual(y2.score_thr, 0.60)
+            self.assertEqual(y2.target_classes, "hand")
+
+            # YOLO: ganti file model -> model lama ditutup dan model baru dimuat
+            y3 = pipeline.get_yolo("model_b.pt", 0.45, "gloves")
+            self.assertIsNot(y2, y3)
+            self.assertEqual(FakeYOLO.init_count, 2)
+            self.assertEqual(FakeYOLO.closed_count, 1)
+            self.assertAlmostEqual(y3.score_thr, 0.45)
+
+        pipeline.close()
+
+
     def test_overlay_renderer_all_modes(self) -> None:
         renderer = OverlayRenderer()
         frame = np.zeros((480, 640, 3), dtype=np.uint8)

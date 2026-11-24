@@ -36,11 +36,13 @@ class StepSequencer:
         debounce_masuk: int = 3,
         debounce_keluar: int = 8,
         ambang_rasio: float = 0.08,
+        use_pixel_diff: bool = True,
     ) -> None:
         self.num_steps = max(1, num_steps)
         self.debounce_masuk = max(1, debounce_masuk)
         self.debounce_keluar = max(1, debounce_keluar)
         self.ambang_rasio = float(ambang_rasio)
+        self.use_pixel_diff = bool(use_pixel_diff)
 
         self.statuses: List[StepStatus] = []
         self.masuk_counts: List[int] = []
@@ -152,9 +154,19 @@ class StepSequencer:
         return False, debounce_info
 
     def finalize_step_exit(
-        self, step_idx: int, diff_ratio: float, step_name: str
+        self, step_idx: int, diff_ratio: Optional[float], step_name: str
     ) -> Tuple[bool, SequencerEvent]:
-        """Memvalidasi rasio perubahan piksel setelah debounce keluar tercapai."""
+        """Memvalidasi penyelesaian langkah setelah debounce keluar tercapai."""
+        if not self.use_pixel_diff or diff_ratio is None:
+            self.last_ratios[step_idx] = 0.0
+            self.statuses[step_idx] = StepStatus.DONE
+            self.masuk_counts[step_idx] = 0
+            event = SequencerEvent(
+                LogLevel.SUCCESS,
+                f"Langkah {step_idx + 1} ({step_name}) Selesai (Debounce OK)",
+            )
+            return True, event
+
         self.last_ratios[step_idx] = diff_ratio
         if diff_ratio >= self.ambang_rasio:
             self.statuses[step_idx] = StepStatus.DONE

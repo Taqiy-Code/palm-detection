@@ -22,6 +22,7 @@ class AppConfig:
     hand_overlap_thr: float = 0.15      # Ambang rasio luas irisan convex hull tangan dan ROI terhadap luas ROI
     motion_fallback_thr: float = 0.02   # Ambang rasio gerak antar-frame di ROI sebagai fallback deteksi tangan
     ref_clean_frames: int = 5           # Jumlah frame stabil tanpa tangan sebelum mengunci referensi
+    use_pixel_diff: bool = False        # Aktifkan/nonaktifkan perbandingan piksel sebelum & sesudah
     debug_diff: bool = False
 
     # Optimasi Sarung Tangan (CLAHE & Pseudo-Skin)

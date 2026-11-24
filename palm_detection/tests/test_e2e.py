@@ -491,6 +491,33 @@ class TestStepSequencer(unittest.TestCase):
         _, expired_after, _ = seq.handle_cycle_completion(t0 + 1.5, cooldown_seconds=1.0)
         self.assertTrue(expired_after)
 
+    def test_step_sequencer_without_pixel_diff_uses_debounce_only(self) -> None:
+        """Memastikan mode tanpa perbandingan piksel menyelesaikan langkah murni berdasarkan debounce."""
+        seq = StepSequencer(
+            num_steps=2,
+            debounce_masuk=2,
+            debounce_keluar=3,
+            ambang_rasio=0.50,
+            use_pixel_diff=False,
+        )
+        # Debounce masuk (butuh 2 frame)
+        self.assertFalse(seq.process_step_entry(0, True)[0])
+        self.assertTrue(seq.process_step_entry(0, True)[0])
+        self.assertEqual(seq.statuses[0], StepStatus.HAND_IN)
+
+        # Debounce keluar (butuh 3 frame)
+        self.assertFalse(seq.process_step_exit(0, False)[0])
+        self.assertFalse(seq.process_step_exit(0, False)[0])
+        self.assertTrue(seq.process_step_exit(0, False)[0])
+
+        # Meskipun diff_ratio = None / 0.0 (< ambang_rasio 0.50), tetap selesai karena pixel diff nonaktif
+        ok, evt = seq.finalize_step_exit(0, None, "Komponen A")
+        self.assertTrue(ok)
+        self.assertEqual(evt.level, LogLevel.SUCCESS)
+        self.assertEqual(seq.statuses[0], StepStatus.DONE)
+        self.assertEqual(seq.get_active_step(), 1)
+
+
 
 class TestEndToEndVideoWorkerAndGUI(unittest.TestCase):
     """Pengujian End-to-End penuh untuk CameraWorker (input/output video & kontrol frame) dan GUI."""
@@ -629,6 +656,66 @@ class TestEndToEndVideoWorkerAndGUI(unittest.TestCase):
         self.assertEqual(out_frames_read, 20)
         self.assertIsNotNone(first_out_frame)
         self.assertEqual(first_out_frame.shape, (480, 640, 3))
+
+    def test_worker_completes_without_pixel_diff_and_without_reference(self) -> None:
+        """Memastikan CameraWorker menyelesaikan langkah tanpa referensi & tanpa perubahan piksel saat use_pixel_diff=False."""
+        static_video_path = os.path.join(self.tmpdir, "static_no_diff.mp4")
+        writer = cv2.VideoWriter(static_video_path, cv2.VideoWriter_fourcc(*"mp4v"), 30.0, (640, 480))
+        static_frame = np.full((480, 640, 3), 80, dtype=np.uint8)
+        for _ in range(18):
+            writer.write(static_frame)
+        writer.release()
+
+        cfg = AppConfig(
+            jumlah_roi=2,
+            debounce_masuk=2,
+            debounce_keluar=2,
+            use_pixel_diff=False,
+            use_roi_crop=False,
+            use_clahe=False,
+            hand_backend=HandBackend.RTMLIB,
+            hand_tracking_mode=TrackingMode.FULL_HAND,
+        )
+        worker = CameraWorker(cfg)
+
+        # Jadwal tangan masuk ROI 1 (frame 1-3), keluar (frame 4-7), masuk ROI 2 (frame 8-10), keluar (frame 11-17)
+        def fake_detect_hands(frame, rois, config):
+            f_idx = worker.video_current_frame
+            if 1 <= f_idx <= 3:
+                pos = (160, 210)
+            elif 8 <= f_idx <= 10:
+                pos = (440, 210)
+            else:
+                pos = None
+            if pos is None:
+                return [], [(0, 0, worker.frame_w, worker.frame_h)]
+            return [DummyHandDetector.make_hand_at(pos[0], pos[1], spread=30)], [
+                (0, 0, worker.frame_w, worker.frame_h)
+            ]
+
+        worker.pipeline.detect_hands = fake_detect_hands  # type: ignore[method-assign]
+        worker.open_video_file(static_video_path)
+        worker.load_saved_rois(self.rois)
+        worker._process_pending_commands(None)
+        self.assertIsNone(worker.referensi)
+
+        with patch.object(worker, "_open_camera", return_value=True):
+            worker.start()
+            worker.start_video_recording(self.out_video_path, start_frame=0, end_frame=17)
+            deadline = time.time() + 8.0
+            while time.time() < deadline:
+                _QT_APP.processEvents()
+                if not worker.is_recording and worker.recorded_frames_count >= 18:
+                    break
+                time.sleep(0.02)
+            worker.stop()
+            _QT_APP.processEvents()
+
+        # Tetap tanpa referensi dan tanpa perubahan piksel, namun kedua langkah & part selesai via debounce
+        self.assertIsNone(worker.referensi)
+        self.assertEqual(worker.sequencer.get_steps_completed(), 2)
+        self.assertEqual(worker.sequencer.parts_completed, 1)
+
 
     def test_gui_mainwindow_and_widgets_end_to_end(self) -> None:
         """Menguji integrasi komponen GUI: MainWindow, kontrol frame video, VideoCanvas, dan SettingsDialog."""

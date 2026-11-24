@@ -1,13 +1,14 @@
 {
     "jumlah_roi": 3,
-    "debounce_masuk": 1,
-    "debounce_keluar": 1,
+    "debounce_masuk": 5,
+    "debounce_keluar": 8,
     "ambang_piksel": 30,
     "ambang_rasio": 0.08,
     "hand_overlap_thr": 0.15,
     "motion_fallback_thr": 0.02,
     "ref_clean_frames": 5,
-    "debug_diff": true,
+    "use_pixel_diff": false,
+    "debug_diff": false,
     "use_clahe": false,
     "clahe_clip_limit": 1.5,
     "clahe_invert_dark": false,
@@ -17,15 +18,15 @@
     "roi_crop_padding": 15,
     "show_crop_box": false,
     "hand_backend": "yolo_detect",
-    "rtm_score_thr": 0.5,
-    "yolo_model_path": "yolo26n.pt",
+    "rtm_score_thr": 0.49999999999999994,
+    "yolo_model_path": "best_1024_yolo26n_dataset-17-11-2026.pt",
     "yolo_target_class": "gloves",
     "hand_tracking_mode": "full_hand",
     "camera_index": 0,
     "frame_width": 1280,
     "frame_height": 720,
-    "auto_focus": true,
-    "auto_exposure": true,
+    "auto_focus": false,
+    "auto_exposure": false,
     "auto_wb": true,
     "focus": 20,
     "exposure": -6,
@@ -34,56 +35,38 @@
     "saved_rois": [
         [
             [
-                60,
-                49
+                856,
+                347
             ],
             [
-                66,
-                683
+                858,
+                718
             ],
             [
-                357,
-                710
+                1144,
+                718
             ],
             [
-                381,
-                62
+                1136,
+                349
             ]
         ],
         [
             [
-                443,
-                51
+                456,
+                340
             ],
             [
-                463,
-                683
+                457,
+                713
             ],
             [
-                894,
-                685
+                791,
+                716
             ],
             [
-                915,
-                75
-            ]
-        ],
-        [
-            [
-                981,
-                54
-            ],
-            [
-                977,
-                714
-            ],
-            [
-                1252,
-                707
-            ],
-            [
-                1254,
-                73
+                778,
+                330
             ]
         ]
     ],

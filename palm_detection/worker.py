@@ -197,6 +197,7 @@ class CameraWorker(QThread):
             debounce_masuk=config.debounce_masuk,
             debounce_keluar=config.debounce_keluar,
             ambang_rasio=config.ambang_rasio,
+            use_pixel_diff=config.use_pixel_diff,
         )
         self.pipeline = HandDetectionPipeline()
         self.renderer = OverlayRenderer()
@@ -1128,6 +1129,13 @@ class CameraWorker(QThread):
                         self._cached_detect_key = detect_key
                         self._cached_detect_res = (tangan, crop_boxes, frame.copy())
 
+                # Sinkronisasi parameter konfigurasi terbaru ke sequencer
+                use_pixel_diff = bool(getattr(self.config, "use_pixel_diff", False))
+                self.sequencer.debounce_masuk = max(1, int(self.config.debounce_masuk))
+                self.sequencer.debounce_keluar = max(1, int(self.config.debounce_keluar))
+                self.sequencer.ambang_rasio = float(self.config.ambang_rasio)
+                self.sequencer.use_pixel_diff = use_pixel_diff
+
                 # Deteksi gerak antar frame (fallback)
                 motion_ratios = [
                     rasio_gerak_roi(
@@ -1141,9 +1149,9 @@ class CameraWorker(QThread):
                 ]
                 any_roi_motion = any(mr >= self.config.motion_fallback_thr for mr in motion_ratios)
 
-                # Stabilisasi referensi bersih (hanya dihitung pada frame baru)
+                # Stabilisasi referensi bersih (hanya diperlukan jika perbandingan piksel aktif)
                 needed_clean = max(1, int(self.config.ref_clean_frames))
-                if is_new_frame:
+                if use_pixel_diff and is_new_frame:
                     if len(tangan) == 0 and not any_roi_motion:
                         self._no_hand_frames += 1
                         self._stable_ref_buffer.append(gray_now.copy())
@@ -1215,7 +1223,7 @@ class CameraWorker(QThread):
                     debounce_info = ""
 
                     # Evaluasi state langkah
-                    if self.referensi is None:
+                    if use_pixel_diff and self.referensi is None:
                         roi_state = RoiState.WAIT_REF
                         teks = f"Menunggu Ref Bersih ({self._no_hand_frames}/{needed_clean})"
                     elif self.sequencer.statuses[idx] == self.sequencer.statuses[idx].DONE:
@@ -1229,33 +1237,42 @@ class CameraWorker(QThread):
 
                             # Langkah aktif: proses keluar
                             if self.sequencer.statuses[idx] == self.sequencer.statuses[idx].HAND_IN:
-                                if not ada_tangan_atau_gerak:
-                                    self._post_hand_frames[idx].append(gray_now.copy())
-                                    if len(self._post_hand_frames[idx]) > 5:
-                                        self._post_hand_frames[idx].pop(0)
-                                else:
-                                    self._post_hand_frames[idx].clear()
+                                if use_pixel_diff:
+                                    if not ada_tangan_atau_gerak:
+                                        self._post_hand_frames[idx].append(gray_now.copy())
+                                        if len(self._post_hand_frames[idx]) > 5:
+                                            self._post_hand_frames[idx].pop(0)
+                                    else:
+                                        self._post_hand_frames[idx].clear()
 
                                 should_eval, debounce_info = self.sequencer.process_step_exit(
                                     idx, ada_tangan_atau_gerak
                                 )
                                 if should_eval:
-                                    if self._post_hand_frames[idx]:
-                                        gray_after = np.mean(self._post_hand_frames[idx], axis=0).astype(np.uint8)
-                                    else:
-                                        gray_after = gray_now
-                                    self._post_hand_frames[idx].clear()
-
-                                    ratio = rasio_perubahan(
-                                        gray_after,
-                                        self.referensi,
-                                        self.masks[idx],
-                                        self.config.ambang_piksel,
-                                        self._morph_kernel,
-                                    )
                                     r_name = self.config.get_roi_name(idx)
-                                    _, evt = self.sequencer.finalize_step_exit(idx, ratio, r_name)
+                                    if use_pixel_diff:
+                                        if self._post_hand_frames[idx]:
+                                            gray_after = np.mean(self._post_hand_frames[idx], axis=0).astype(np.uint8)
+                                        else:
+                                            gray_after = gray_now
+                                        self._post_hand_frames[idx].clear()
+
+                                        ratio: Optional[float] = rasio_perubahan(
+                                            gray_after,
+                                            self.referensi,
+                                            self.masks[idx],
+                                            self.config.ambang_piksel,
+                                            self._morph_kernel,
+                                        )
+                                    else:
+                                        self._post_hand_frames[idx].clear()
+                                        ratio = None
+
+                                    completed, evt = self.sequencer.finalize_step_exit(idx, ratio, r_name)
                                     self.log_event.emit(evt.level.value, evt.message)
+                                    if completed:
+                                        self.sequencer.clear_error_counts()
+                                        aktif = self.sequencer.get_active_step()
 
                         if self.sequencer.statuses[idx] == self.sequencer.statuses[idx].DONE:
                             roi_state = RoiState.DONE
@@ -1300,6 +1317,7 @@ class CameraWorker(QThread):
                         "ratio": self.sequencer.last_ratios[idx],
                         "diff_ratio": self.sequencer.last_ratios[idx],
                         "ambang_rasio": self.config.ambang_rasio,
+                        "use_pixel_diff": use_pixel_diff,
                         "debounce": debounce_info,
                     })
 
@@ -1308,7 +1326,7 @@ class CameraWorker(QThread):
 
                 # Banner Text & Auto-Cycle Completion
                 aktif_now = self.sequencer.get_active_step()
-                if self.referensi is None:
+                if use_pixel_diff and self.referensi is None:
                     if self.is_video_mode and self.video_paused:
                         banner_text = (
                             f"PILIH FRAME REFERENSI: Geser ke frame bersih lalu klik 'Jadikan Frame Ini Referensi' "
@@ -1329,7 +1347,14 @@ class CameraWorker(QThread):
 
                     banner_state = BannerState.DONE
                     if cooldown_expired:
-                        if self._no_hand_frames >= needed_clean and len(self._stable_ref_buffer) >= needed_clean:
+                        if not use_pixel_diff:
+                            self.sequencer.clear_statuses()
+                            self.log_event.emit(
+                                LogLevel.INFO.value,
+                                f"Mulai siklus Part #{self.sequencer.parts_completed + 1}...",
+                            )
+                            banner_text = f"PART #{self.sequencer.parts_completed} SELESAI (+1). Memulai siklus baru..."
+                        elif self._no_hand_frames >= needed_clean and len(self._stable_ref_buffer) >= needed_clean:
                             self.sequencer.clear_statuses()
                             self.referensi = np.mean(self._stable_ref_buffer, axis=0).astype(np.uint8)
                             self.log_event.emit(
@@ -1345,7 +1370,7 @@ class CameraWorker(QThread):
                     else:
                         banner_text = f"PART #{self.sequencer.parts_completed} SELESAI (+1). Menyiapkan siklus berikutnya..."
                 else:
-                    if salah_urut is not None:
+                    if salah_urut is not None and salah_urut != aktif_now:
                         target_name = self.config.get_roi_name(aktif_now)
                         wrong_name = self.config.get_roi_name(salah_urut)
                         banner_text = f"URUTAN SALAH! Kerjakan [{target_name}], bukan [{wrong_name}]"
@@ -1399,6 +1424,7 @@ class CameraWorker(QThread):
                 "rois_coords": [r.tolist() for r in self.rois],
                 "fps": fps,
                 "has_reference": self.referensi is not None,
+                "use_pixel_diff": bool(getattr(self.config, "use_pixel_diff", False)),
                 "roi_defined": len(self.rois),
                 "roi_total": jumlah_roi,
                 "steps_completed": self.sequencer.get_steps_completed(),

@@ -562,6 +562,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                         <input type="number" id="cfgJumlahRoi" min="1" max="6">
                     </div>
                 </div>
+                <div class="form-group">
+                    <label>Perbandingan Piksel (Sebelum vs Sesudah)</label>
+                    <select id="cfgUsePixelDiff">
+                        <option value="false">Nonaktif (Hanya Debounce)</option>
+                        <option value="true">Aktif (Validasi Diff Piksel)</option>
+                    </select>
+                </div>
                 <div class="form-row">
                     <div class="form-group">
                         <label>Ambang Piksel (0-255)</label>
@@ -704,11 +711,14 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 const st = ROI_STYLES[r.state] || ROI_STYLES["LOCKED"];
                 const ratioPct = ((r.diff_ratio || 0) * 100).toFixed(1);
                 const ambangPct = ((r.ambang_rasio || 0.08) * 100).toFixed(1);
+                const diffSubtext = (r.use_pixel_diff === false)
+                    ? 'Diff: Nonaktif (Debounce)'
+                    : `Diff: ${ratioPct}% (Min ${ambangPct}%)`;
                 html += `
                     <div class="roi-item" style="border-left: 4px solid ${st.badge};">
                         <div>
                             <input type="text" value="${r.name || ('ROI #' + (idx+1))}" onchange="changeRoiName(${idx}, this.value)">
-                            <div style="font-size: 0.68rem; color: var(--text-muted); margin-left: 4px;">Diff: ${ratioPct}% (Min ${ambangPct}%)</div>
+                            <div style="font-size: 0.68rem; color: var(--text-muted); margin-left: 4px;">${diffSubtext}</div>
                         </div>
                         <div class="roi-metrics">
                             <span class="badge-roi" style="background: ${st.bg}; color: ${st.badge}; border: 1px solid ${st.border};">${r.state}</span>
@@ -854,6 +864,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 document.getElementById('cfgYoloClass').value = cfg.yolo_target_class || 'gloves';
                 document.getElementById('cfgTrackMode').value = cfg.hand_tracking_mode || 'full_hand';
                 document.getElementById('cfgJumlahRoi').value = cfg.jumlah_roi || 3;
+                document.getElementById('cfgUsePixelDiff').value = cfg.use_pixel_diff ? "true" : "false";
                 document.getElementById('cfgAmbangPiksel').value = cfg.ambang_piksel || 30;
                 document.getElementById('cfgAmbangRasio').value = ((cfg.ambang_rasio || 0.08) * 100).toFixed(1);
                 document.getElementById('cfgDebounceIn').value = cfg.debounce_masuk || 6;
@@ -878,6 +889,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 yolo_target_class: document.getElementById('cfgYoloClass').value || 'gloves',
                 hand_tracking_mode: document.getElementById('cfgTrackMode').value,
                 jumlah_roi: parseInt(document.getElementById('cfgJumlahRoi').value) || 3,
+                use_pixel_diff: document.getElementById('cfgUsePixelDiff').value === "true",
                 ambang_piksel: parseInt(document.getElementById('cfgAmbangPiksel').value) || 30,
                 ambang_rasio: (parseFloat(document.getElementById('cfgAmbangRasio').value) || 8.0) / 100.0,
                 debounce_masuk: parseInt(document.getElementById('cfgDebounceIn').value) || 6,
@@ -1006,6 +1018,8 @@ def api_config():
         worker.sequencer.debounce_keluar = int(data["debounce_keluar"])
     if "ambang_rasio" in data:
         worker.sequencer.ambang_rasio = float(data["ambang_rasio"])
+    if "use_pixel_diff" in data:
+        worker.sequencer.use_pixel_diff = bool(data["use_pixel_diff"])
 
     worker.config.save(_global_config_path)
     worker.log_event.emit("SUCCESS", "Pengaturan sistem berhasil diperbarui dan disimpan.")

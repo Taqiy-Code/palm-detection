@@ -224,7 +224,13 @@ class ROICardWidget(QFrame):
         self.name_changed.emit(self.idx, new_name)
 
     def update_card(
-        self, state: RoiState | str, label: str, ratio: float, debounce: str, ambang_rasio: float
+        self,
+        state: RoiState | str,
+        label: str,
+        ratio: float,
+        debounce: str,
+        ambang_rasio: float,
+        use_pixel_diff: bool = True,
     ) -> None:
         state_key = state.value if isinstance(state, RoiState) else str(state)
         styles = {
@@ -247,7 +253,10 @@ class ROICardWidget(QFrame):
             f"background-color: {border}; color: #ffffff; font-weight: bold; "
             f"font-size: 11px; border-radius: 4px; padding: 2px 6px;"
         )
-        self.ratio_lbl.setText(f"Diff: {ratio * 100:.1f}% (Min {ambang_rasio * 100:.1f}%)")
+        if use_pixel_diff:
+            self.ratio_lbl.setText(f"Diff: {ratio * 100:.1f}% (Min {ambang_rasio * 100:.1f}%)")
+        else:
+            self.ratio_lbl.setText("Diff: Nonaktif (Debounce)")
         self.debounce_lbl.setText(debounce)
 
 
@@ -416,7 +425,11 @@ class SettingsDialog(QDialog):
         self.spin_jumlah_roi.valueChanged.connect(self.on_jumlah_roi_changed)
         grid.addWidget(self.spin_jumlah_roi, 0, 1)
 
-        grid.addWidget(QLabel("Ambang Piksel:"), 1, 0)
+        self.chk_use_pixel_diff = QCheckBox("Aktifkan Perbandingan Piksel (Sebelum vs Sesudah)")
+        self.chk_use_pixel_diff.setChecked(bool(getattr(self.config, "use_pixel_diff", False)))
+        grid.addWidget(self.chk_use_pixel_diff, 1, 0, 1, 2)
+
+        grid.addWidget(QLabel("Ambang Piksel:"), 2, 0)
         self.spin_ambang_piksel = QSpinBox()
         self.spin_ambang_piksel.setRange(5, 200)
         self.spin_ambang_piksel.setValue(self.config.ambang_piksel)
@@ -424,44 +437,41 @@ class SettingsDialog(QDialog):
         self.spin_ambang_piksel.valueChanged.connect(
             lambda v: setattr(self.config, "ambang_piksel", v)
         )
-        grid.addWidget(self.spin_ambang_piksel, 1, 1)
+        grid.addWidget(self.spin_ambang_piksel, 2, 1)
 
-        grid.addWidget(QLabel("Ambang Rasio Area:"), 2, 0)
+        grid.addWidget(QLabel("Ambang Rasio Area:"), 3, 0)
         self.spin_ambang_rasio = QDoubleSpinBox()
         self.spin_ambang_rasio.setRange(0.5, 95.0)
         self.spin_ambang_rasio.setSingleStep(0.5)
         self.spin_ambang_rasio.setDecimals(1)
         self.spin_ambang_rasio.setSuffix(" %")
         self.spin_ambang_rasio.setValue(self.config.ambang_rasio * 100.0)
-        self.spin_ambang_rasio.valueChanged.connect(
-            lambda v: setattr(self.config, "ambang_rasio", round(v / 100.0, 4))
-        )
-        grid.addWidget(self.spin_ambang_rasio, 2, 1)
+        self.spin_ambang_rasio.valueChanged.connect(self._on_ambang_rasio_changed)
+        grid.addWidget(self.spin_ambang_rasio, 3, 1)
 
-        grid.addWidget(QLabel("Debounce Masuk:"), 3, 0)
+        grid.addWidget(QLabel("Debounce Masuk:"), 4, 0)
         self.spin_debounce_masuk = QSpinBox()
         self.spin_debounce_masuk.setRange(1, 60)
         self.spin_debounce_masuk.setSuffix(" frame")
         self.spin_debounce_masuk.setValue(self.config.debounce_masuk)
-        self.spin_debounce_masuk.valueChanged.connect(
-            lambda v: setattr(self.config, "debounce_masuk", v)
-        )
-        grid.addWidget(self.spin_debounce_masuk, 3, 1)
+        self.spin_debounce_masuk.valueChanged.connect(self._on_debounce_masuk_changed)
+        grid.addWidget(self.spin_debounce_masuk, 4, 1)
 
-        grid.addWidget(QLabel("Debounce Keluar:"), 4, 0)
+        grid.addWidget(QLabel("Debounce Keluar:"), 5, 0)
         self.spin_debounce_keluar = QSpinBox()
         self.spin_debounce_keluar.setRange(1, 90)
         self.spin_debounce_keluar.setSuffix(" frame")
         self.spin_debounce_keluar.setValue(self.config.debounce_keluar)
-        self.spin_debounce_keluar.valueChanged.connect(
-            lambda v: setattr(self.config, "debounce_keluar", v)
-        )
-        grid.addWidget(self.spin_debounce_keluar, 4, 1)
+        self.spin_debounce_keluar.valueChanged.connect(self._on_debounce_keluar_changed)
+        grid.addWidget(self.spin_debounce_keluar, 5, 1)
 
         self.chk_debug_diff = QCheckBox("Tampilkan Highlight Piksel Berubah")
         self.chk_debug_diff.setChecked(self.config.debug_diff)
         self.chk_debug_diff.toggled.connect(lambda c: setattr(self.config, "debug_diff", c))
-        grid.addWidget(self.chk_debug_diff, 5, 0, 1, 2)
+        grid.addWidget(self.chk_debug_diff, 6, 0, 1, 2)
+
+        self.chk_use_pixel_diff.toggled.connect(self._on_use_pixel_diff_toggled)
+        self._on_use_pixel_diff_toggled(self.chk_use_pixel_diff.isChecked())
 
         layout.addWidget(param_group)
         layout.addStretch()
@@ -758,6 +768,26 @@ class SettingsDialog(QDialog):
             f"Konfigurasi dan {len(self.config.saved_rois)} ROI berhasil disimpan ke {CONFIG_FILE}.",
         )
 
+    def _on_use_pixel_diff_toggled(self, checked: bool) -> None:
+        self.config.use_pixel_diff = bool(checked)
+        self.worker.sequencer.use_pixel_diff = bool(checked)
+        self.spin_ambang_piksel.setEnabled(bool(checked))
+        self.spin_ambang_rasio.setEnabled(bool(checked))
+        self.chk_debug_diff.setEnabled(bool(checked))
+
+    def _on_ambang_rasio_changed(self, v: float) -> None:
+        val = round(v / 100.0, 4)
+        self.config.ambang_rasio = val
+        self.worker.sequencer.ambang_rasio = val
+
+    def _on_debounce_masuk_changed(self, v: int) -> None:
+        self.config.debounce_masuk = int(v)
+        self.worker.sequencer.debounce_masuk = max(1, int(v))
+
+    def _on_debounce_keluar_changed(self, v: int) -> None:
+        self.config.debounce_keluar = int(v)
+        self.worker.sequencer.debounce_keluar = max(1, int(v))
+
     def load_configuration(self) -> None:
         loaded = AppConfig.load(CONFIG_FILE)
         self.config.update_from(loaded)
@@ -766,6 +796,8 @@ class SettingsDialog(QDialog):
         self.spin_jumlah_roi.setValue(self.config.jumlah_roi)
         self.spin_jumlah_roi.blockSignals(False)
 
+        self.chk_use_pixel_diff.setChecked(bool(getattr(self.config, "use_pixel_diff", False)))
+        self._on_use_pixel_diff_toggled(self.chk_use_pixel_diff.isChecked())
         self.spin_ambang_piksel.setValue(self.config.ambang_piksel)
         self.spin_ambang_rasio.setValue(self.config.ambang_rasio * 100.0)
         self.spin_debounce_masuk.setValue(self.config.debounce_masuk)
@@ -1411,6 +1443,7 @@ class MainWindow(QMainWindow):
         if len(rois_data) != len(self.roi_cards):
             self._rebuild_roi_cards(len(rois_data))
 
+        use_pixel_diff = bool(data.get("use_pixel_diff", getattr(self.config, "use_pixel_diff", False)))
         for item, card in zip(rois_data, self.roi_cards):
             card.update_card(
                 item["state"],
@@ -1418,6 +1451,7 @@ class MainWindow(QMainWindow):
                 item["ratio"],
                 item["debounce"],
                 self.config.ambang_rasio,
+                item.get("use_pixel_diff", use_pixel_diff),
             )
 
         # Sinkronisasi kontrol video & penentuan frame oleh pengguna
@@ -1504,7 +1538,11 @@ class MainWindow(QMainWindow):
         else:
             engine_str = "Google MediaPipe"
         rec_str = f" | [REC: {rec_count} frame]" if is_rec else ""
-        if data["has_reference"]:
+        if not use_pixel_diff:
+            self.ref_status_lbl.setText(
+                f"Engine: {engine_str} | Diff Piksel: Nonaktif | FPS: {data['fps']:.1f}{rec_str}"
+            )
+        elif data["has_reference"]:
             self.ref_status_lbl.setText(
                 f"Engine: {engine_str} | Referensi: Tersimpan | FPS: {data['fps']:.1f}{rec_str}"
             )

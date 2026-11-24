@@ -37,12 +37,14 @@ class StepSequencer:
         debounce_keluar: int = 8,
         ambang_rasio: float = 0.08,
         use_pixel_diff: bool = True,
+        debounce_decay: int = 1,
     ) -> None:
         self.num_steps = max(1, num_steps)
         self.debounce_masuk = max(1, debounce_masuk)
         self.debounce_keluar = max(1, debounce_keluar)
         self.ambang_rasio = float(ambang_rasio)
         self.use_pixel_diff = bool(use_pixel_diff)
+        self.debounce_decay = max(1, int(debounce_decay))
 
         self.statuses: List[StepStatus] = []
         self.masuk_counts: List[int] = []
@@ -115,15 +117,19 @@ class StepSequencer:
         return self.get_active_step() is None
 
     def process_step_entry(self, step_idx: int, hand_in_roi: bool) -> Tuple[bool, str]:
-        """Memproses debounce saat tangan masuk ke ROI aktif."""
+        """Memproses debounce saat tangan masuk ke ROI aktif (leaky bucket anti-flicker)."""
         if step_idx >= len(self.statuses):
             return False, ""
         debounce_info = ""
         if self.statuses[step_idx] == StepStatus.WAITING:
             if hand_in_roi:
-                self.masuk_counts[step_idx] += 1
+                self.masuk_counts[step_idx] = min(
+                    self.debounce_masuk, self.masuk_counts[step_idx] + 1
+                )
             else:
-                self.masuk_counts[step_idx] = 0
+                self.masuk_counts[step_idx] = max(
+                    0, self.masuk_counts[step_idx] - self.debounce_decay
+                )
 
             if self.masuk_counts[step_idx] > 0:
                 debounce_info = f"Masuk: {self.masuk_counts[step_idx]}/{self.debounce_masuk}"
@@ -138,7 +144,7 @@ class StepSequencer:
     def process_step_exit(
         self, step_idx: int, hand_or_motion_present: bool
     ) -> Tuple[bool, str]:
-        """Memproses debounce saat tangan keluar dari ROI aktif.
+        """Memproses debounce saat tangan keluar dari ROI aktif (leaky bucket anti-flicker).
 
         Mengembalikan (should_evaluate_diff, debounce_info).
         """
@@ -147,9 +153,13 @@ class StepSequencer:
         debounce_info = ""
         if self.statuses[step_idx] == StepStatus.HAND_IN:
             if not hand_or_motion_present:
-                self.keluar_counts[step_idx] += 1
+                self.keluar_counts[step_idx] = min(
+                    self.debounce_keluar, self.keluar_counts[step_idx] + 1
+                )
             else:
-                self.keluar_counts[step_idx] = 0
+                self.keluar_counts[step_idx] = max(
+                    0, self.keluar_counts[step_idx] - self.debounce_decay
+                )
 
             debounce_info = f"Keluar: {self.keluar_counts[step_idx]}/{self.debounce_keluar}"
             if self.keluar_counts[step_idx] >= self.debounce_keluar:
@@ -165,6 +175,7 @@ class StepSequencer:
             self.last_ratios[step_idx] = 0.0
             self.statuses[step_idx] = StepStatus.DONE
             self.masuk_counts[step_idx] = 0
+            self.keluar_counts[step_idx] = 0
             event = SequencerEvent(
                 LogLevel.SUCCESS,
                 f"Langkah {step_idx + 1} ({step_name}) Selesai (Debounce OK)",
@@ -175,6 +186,7 @@ class StepSequencer:
         if diff_ratio >= self.ambang_rasio:
             self.statuses[step_idx] = StepStatus.DONE
             self.masuk_counts[step_idx] = 0
+            self.keluar_counts[step_idx] = 0
             event = SequencerEvent(
                 LogLevel.SUCCESS,
                 f"Langkah {step_idx + 1} ({step_name}) Selesai: Diff {diff_ratio * 100:.1f}%",
@@ -183,6 +195,7 @@ class StepSequencer:
         else:
             self.statuses[step_idx] = StepStatus.WAITING
             self.masuk_counts[step_idx] = 0
+            self.keluar_counts[step_idx] = 0
             event = SequencerEvent(
                 LogLevel.WARN,
                 f"Langkah {step_idx + 1} ({step_name}) ditolak: Diff {diff_ratio * 100:.1f}% < target {self.ambang_rasio * 100:.1f}%",
@@ -192,14 +205,15 @@ class StepSequencer:
     def process_locked_step(
         self, step_idx: int, hand_in_roi: bool, debounce_err: int = 2
     ) -> bool:
-        """Memproses debounce urutan salah (tangan di ROI terkunci)."""
+        """Memproses debounce urutan salah (tangan di ROI terkunci) dengan leaky bucket."""
         if step_idx >= len(self.error_counts):
             return False
+        thr = max(1, debounce_err)
         if hand_in_roi:
-            self.error_counts[step_idx] += 1
+            self.error_counts[step_idx] = min(thr, self.error_counts[step_idx] + 1)
         else:
-            self.error_counts[step_idx] = 0
-        return self.error_counts[step_idx] >= max(1, debounce_err)
+            self.error_counts[step_idx] = max(0, self.error_counts[step_idx] - self.debounce_decay)
+        return self.error_counts[step_idx] >= thr
 
     def process_done_step_reentry(
         self, step_idx: int, hand_in_roi: bool, debounce_reentry: int = 3
@@ -210,11 +224,12 @@ class StepSequencer:
         if self.statuses[step_idx] != StepStatus.DONE:
             self.reentry_counts[step_idx] = 0
             return False
+        thr = max(1, debounce_reentry)
         if hand_in_roi:
-            self.reentry_counts[step_idx] += 1
+            self.reentry_counts[step_idx] = min(thr, self.reentry_counts[step_idx] + 1)
         else:
-            self.reentry_counts[step_idx] = 0
-        return self.reentry_counts[step_idx] >= max(1, debounce_reentry)
+            self.reentry_counts[step_idx] = max(0, self.reentry_counts[step_idx] - self.debounce_decay)
+        return self.reentry_counts[step_idx] >= thr
 
     def clear_error_counts(self) -> None:
         """Mengosongkan counter error dan counter akses ulang seluruh ROI."""

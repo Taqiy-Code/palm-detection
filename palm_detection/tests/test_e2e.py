@@ -644,7 +644,9 @@ class TestStepSequencer(unittest.TestCase):
         self.assertTrue(seq.process_done_step_reentry(0, True, debounce_reentry=2))
         self.assertEqual(seq.statuses[0], StepStatus.DONE)
 
-        # Tangan keluar -> kembali normal, status tetap DONE
+        # Tangan keluar -> langsung berhenti error dan meluruh bertahap ke 0, status tetap DONE
+        self.assertFalse(seq.process_done_step_reentry(0, False, debounce_reentry=2))
+        self.assertEqual(seq.reentry_counts[0], 1)
         self.assertFalse(seq.process_done_step_reentry(0, False, debounce_reentry=2))
         self.assertEqual(seq.reentry_counts[0], 0)
         self.assertEqual(seq.statuses[0], StepStatus.DONE)
@@ -654,6 +656,61 @@ class TestStepSequencer(unittest.TestCase):
         self.assertEqual(seq.reentry_counts[0], 1)
         seq.clear_error_counts()
         self.assertEqual(seq.reentry_counts[0], 0)
+
+    def test_leaky_debounce_tolerates_single_frame_flicker(self) -> None:
+        """Memastikan leaky debounce mentoleransi flicker 1 frame tanpa mereset counter ke 0 dan tanpa false trigger."""
+        seq = StepSequencer(num_steps=2, debounce_masuk=4, debounce_keluar=5, use_pixel_diff=False)
+
+        # 1. Noise selang-seling 50% (T, F, T, F, T, F) tidak boleh memicu HAND_IN
+        for present in (True, False, True, False, True, False):
+            entered, _ = seq.process_step_entry(0, present)
+            self.assertFalse(entered)
+        self.assertEqual(seq.statuses[0], StepStatus.WAITING)
+        self.assertEqual(seq.masuk_counts[0], 0)
+
+        # 2. Masuk dengan 1-frame flicker di tengah (T, T, T, F, T, T -> 1, 2, 3, 2, 3, 4)
+        for present in (True, True, True):
+            self.assertFalse(seq.process_step_entry(0, present)[0])
+        self.assertEqual(seq.masuk_counts[0], 3)
+        self.assertFalse(seq.process_step_entry(0, False)[0])  # 1-frame flicker
+        self.assertEqual(seq.masuk_counts[0], 2)
+        self.assertFalse(seq.process_step_entry(0, True)[0])
+        self.assertEqual(seq.masuk_counts[0], 3)
+        self.assertTrue(seq.process_step_entry(0, True)[0])
+        self.assertEqual(seq.statuses[0], StepStatus.HAND_IN)
+
+        # 3. Keluar dengan 1-frame flicker gerak/deteksi (out x4, in, out x2 -> 1,2,3,4,3,4,5)
+        for _ in range(4):
+            self.assertFalse(seq.process_step_exit(0, False)[0])
+        self.assertEqual(seq.keluar_counts[0], 4)
+        self.assertFalse(seq.process_step_exit(0, True)[0])  # 1-frame flicker
+        self.assertEqual(seq.keluar_counts[0], 3)
+        self.assertFalse(seq.process_step_exit(0, False)[0])
+        self.assertTrue(seq.process_step_exit(0, False)[0])
+
+        # 4. Locked step error mentoleransi 1-frame flicker dan capped pada threshold agar cepat pulih
+        self.assertFalse(seq.process_locked_step(1, True, debounce_err=3))
+        self.assertFalse(seq.process_locked_step(1, True, debounce_err=3))
+        self.assertFalse(seq.process_locked_step(1, False, debounce_err=3))  # 1-frame flicker (2 -> 1)
+        self.assertEqual(seq.error_counts[1], 1)
+        self.assertFalse(seq.process_locked_step(1, True, debounce_err=3))   # 1 -> 2
+        self.assertTrue(seq.process_locked_step(1, True, debounce_err=3))    # 2 -> 3 (ERROR)
+        self.assertTrue(seq.process_locked_step(1, True, debounce_err=3))    # tetap capped di 3
+        self.assertEqual(seq.error_counts[1], 3)
+        self.assertFalse(seq.process_locked_step(1, False, debounce_err=3))  # langsung non-error (3 -> 2)
+        self.assertEqual(seq.error_counts[1], 2)
+
+        # 5. Re-entry pada ROI DONE mentoleransi 1-frame flicker dan capped pada threshold
+        seq.finalize_step_exit(0, None, "Komponen A")
+        for _ in range(3):
+            self.assertFalse(seq.process_done_step_reentry(0, True, debounce_reentry=4))
+        self.assertFalse(seq.process_done_step_reentry(0, False, debounce_reentry=4))  # 3 -> 2
+        self.assertEqual(seq.reentry_counts[0], 2)
+        self.assertFalse(seq.process_done_step_reentry(0, True, debounce_reentry=4))   # 2 -> 3
+        self.assertTrue(seq.process_done_step_reentry(0, True, debounce_reentry=4))    # 3 -> 4 (DOUBLE PICK)
+        self.assertTrue(seq.process_done_step_reentry(0, True, debounce_reentry=4))    # capped di 4
+        self.assertEqual(seq.reentry_counts[0], 4)
+        self.assertFalse(seq.process_done_step_reentry(0, False, debounce_reentry=4))  # langsung pulih (4 -> 3)
 
 
 class TestEndToEndVideoWorkerAndGUI(unittest.TestCase):
@@ -1230,6 +1287,62 @@ class TestEndToEndVideoWorkerAndGUI(unittest.TestCase):
             )
         )
         self.assertTrue(any(t.get("camera_connected") is True for t in telemetry_log))
+
+    def test_worker_tolerates_single_frame_detection_flicker(self) -> None:
+        """Memastikan 1-frame flicker deteksi YOLO saat masuk maupun keluar tidak menggagalkan langkah aktif."""
+        flicker_video_path = os.path.join(self.tmpdir, "flicker_step.mp4")
+        writer = cv2.VideoWriter(flicker_video_path, cv2.VideoWriter_fourcc(*"mp4v"), 30.0, (640, 480))
+        static_frame = np.full((480, 640, 3), 80, dtype=np.uint8)
+        for _ in range(13):
+            writer.write(static_frame)
+        writer.release()
+
+        cfg = AppConfig(
+            jumlah_roi=2,
+            debounce_masuk=4,
+            debounce_keluar=4,
+            use_pixel_diff=False,
+            use_roi_crop=False,
+            use_clahe=False,
+            hand_backend=HandBackend.RTMLIB,
+            hand_tracking_mode=TrackingMode.FULL_HAND,
+        )
+        worker = CameraWorker(cfg)
+
+        # Frame 0..2 : tangan di ROI 1 (masuk: 1, 2, 3)
+        # Frame 3    : flicker hilang 1 frame (masuk: 3 -> 2, bukan 0)
+        # Frame 4..5 : tangan di ROI 1 (masuk: 3, 4 -> HAND_IN)
+        # Frame 6..8 : tangan keluar (keluar: 1, 2, 3)
+        # Frame 9    : flicker palsu 1 frame di ROI 1 (keluar: 3 -> 2, bukan 0)
+        # Frame 10..11: tangan keluar (keluar: 3, 4 -> ROI 1 DONE)
+        def fake_detect_hands(frame, rois, config):
+            f_idx = worker.video_current_frame
+            if f_idx in (0, 1, 2, 4, 5, 9):
+                return [DummyHandDetector.make_hand_at(160, 210, spread=30)], [
+                    (0, 0, worker.frame_w, worker.frame_h)
+                ]
+            return [], [(0, 0, worker.frame_w, worker.frame_h)]
+
+        worker.pipeline.detect_hands = fake_detect_hands  # type: ignore[method-assign]
+        worker.open_video_file(flicker_video_path)
+        worker.load_saved_rois(self.rois)
+        worker._process_pending_commands(None)
+
+        with patch.object(worker, "_open_camera", return_value=True):
+            worker.start()
+            worker.start_video_recording(self.out_video_path, start_frame=0, end_frame=12)
+            deadline = time.time() + 8.0
+            while time.time() < deadline:
+                _QT_APP.processEvents()
+                if not worker.is_recording and worker.recorded_frames_count >= 13:
+                    break
+                time.sleep(0.02)
+            worker.stop()
+            _QT_APP.processEvents()
+
+        # Dengan hard-reset, langkah 1 tidak mungkin selesai dalam 12 frame; dengan leaky debounce harus DONE
+        self.assertEqual(worker.sequencer.statuses[0], StepStatus.DONE)
+        self.assertEqual(worker.sequencer.get_active_step(), 1)
 
     def test_gui_mainwindow_and_widgets_end_to_end(self) -> None:
         """Menguji integrasi komponen GUI: MainWindow, kontrol frame video, VideoCanvas, dan SettingsDialog."""
